@@ -1,0 +1,139 @@
+<?php
+
+include_once(dirname(__FILE__) . '/Database.php');
+include_once(dirname(__FILE__) . '/User.php');
+include_once(dirname(__FILE__) . '/UserType.php');
+include_once(dirname(__FILE__) . '/DefaultData.php');
+include_once(dirname(__FILE__) . '/Message.php');
+include_once(dirname(__FILE__) . '/Upload.php');
+include_once(dirname(__FILE__) . '/Helper.php');
+include_once(dirname(__FILE__) . '/ItemMaster.php');
+include_once(dirname(__FILE__) . '/Bank.php');
+include_once(dirname(__FILE__) . '/Branch.php');
+include_once(dirname(__FILE__) . '/BrandCategory.php');
+include_once(dirname(__FILE__) . '/Brand.php');
+include_once(dirname(__FILE__) . '/CategoryMaster.php');
+include_once(dirname(__FILE__) . '/GroupMaster.php');
+include_once(dirname(__FILE__) . '/CompanyProfile.php');
+include_once(dirname(__FILE__) . '/Country.php');
+include_once(dirname(__FILE__) . '/StockType.php');
+include_once(dirname(__FILE__) . '/DepartmentMaster.php');
+include_once(dirname(__FILE__) . '/ExpenseTypeMaster.php');
+include_once(dirname(__FILE__) . '/CustomerCategory.php');
+include_once(dirname(__FILE__) . '/District.php');
+include_once(dirname(__FILE__) . '/Province.php');
+include_once(dirname(__FILE__) . '/CustomerMaster.php');
+include_once(dirname(__FILE__) . '/PaymentType.php');
+include_once(dirname(__FILE__) . '/SalesInvoice.php');
+include_once(dirname(__FILE__) . '/SalesInvoiceItem.php');
+include_once(dirname(__FILE__) . '/PageCategory.php');
+include_once(dirname(__FILE__) . '/Pages.php');
+include_once(dirname(__FILE__) . '/Permission.php');
+include_once(dirname(__FILE__) . '/UserPermission.php');
+include_once(dirname(__FILE__) . '/MarketingExecutive.php');
+include_once(dirname(__FILE__) . '/RepFollowup.php');
+include_once(dirname(__FILE__) . '/Quotation.php');
+include_once(dirname(__FILE__) . '/QuotationItem.php');
+include_once(dirname(__FILE__) . '/SizeMaster.php'); 
+include_once(dirname(__FILE__) . '/StockTransaction.php');
+include_once(dirname(__FILE__) . '/StockAdjustmentType.php'); 
+include_once(dirname(__FILE__) . '/InvoiceRemark.php');
+include_once(dirname(__FILE__) . '/Bank.php');
+include_once(dirname(__FILE__) . '/EmployeeMaster.php');
+include_once(dirname(__FILE__) . '/EmployeeCategoryMaster.php');
+include_once(dirname(__FILE__) . '/ArnMaster.php');
+include_once(dirname(__FILE__) . '/ArnItem.php');
+include_once(dirname(__FILE__) . '/DocumentTracking.php');
+include_once(dirname(__FILE__) . '/PurchaseType.php');
+include_once(dirname(__FILE__) . '/CreditPeriod.php');
+include_once(dirname(__FILE__) . '/SalesType.php');
+include_once(dirname(__FILE__) . '/PurchaseOrder.php');
+include_once(dirname(__FILE__) . '/PurchaseOrderItem.php');
+include_once(dirname(__FILE__) . '/StockMaster.php');
+include_once(dirname(__FILE__) . '/AuditLog.php');
+include_once(dirname(__FILE__) . '/PurchaseReturn.php');
+include_once(dirname(__FILE__) . '/StockItemTmp.php'); 
+include_once(dirname(__FILE__) . '/ArnQrGenaretor.php');
+include_once(dirname(__FILE__) . '/Expenses.php');
+include_once(dirname(__FILE__) . '/NonPermissionPage.php');
+include_once(dirname(__FILE__) . '/InvoicePayments.php');
+include_once(dirname(__FILE__) . '/SpecialPermission.php');
+include_once(dirname(__FILE__) . '/PaymentReceipt.php');
+include_once(dirname(__FILE__) . '/PaymentReceiptMethod.php');
+include_once(dirname(__FILE__) . '/ServiceItem.php');
+include_once(dirname(__FILE__) . '/Service.php');
+include_once(dirname(__FILE__) . '/BrandWiseDis.php');
+include_once(dirname(__FILE__) . '/SupplierPayment.php');
+include_once(dirname(__FILE__) . '/ServiceIncome.php');
+include_once(dirname(__FILE__) . '/PaymentReceiptSupplier.php');
+include_once(dirname(__FILE__) . '/PaymentReceiptMethodSupplier.php');
+include_once(dirname(__FILE__) . '/SalesReturn.php');
+include_once(dirname(__FILE__) . '/SalesReturnItem.php');
+include_once(dirname(__FILE__) . '/Cashbook.php');
+include_once(dirname(__FILE__) . '/DailyIncome.php');
+include_once(dirname(__FILE__) . '/SupplierDiscount.php');
+include_once(dirname(__FILE__) . '/Equipment.php');
+include_once(dirname(__FILE__) . '/RentType.php');
+include_once(dirname(__FILE__) . '/EquipmentRent.php');
+include_once(dirname(__FILE__) . '/EquipmentRentItem.php');
+include_once(dirname(__FILE__) . '/EquipmentRentReturn.php');
+include_once(dirname(__FILE__) . '/SubEquipment.php');
+include_once(dirname(__FILE__) . '/EquipmentCategory.php');
+include_once(dirname(__FILE__) . '/EquipmentRentQuotation.php');
+include_once(dirname(__FILE__) . '/EquipmentRentQuotationItem.php');
+include_once(dirname(__FILE__) . '/RepairJob.php');
+include_once(dirname(__FILE__) . '/RepairJobItem.php');
+include_once(dirname(__FILE__) . '/IssueNote.php');
+include_once(dirname(__FILE__) . '/IssueNoteItem.php');
+include_once(dirname(__FILE__) . '/IssueReturnNote.php');
+include_once(dirname(__FILE__) . '/IssueReturnNoteItem.php');
+include_once(dirname(__FILE__) . '/LoyaltyPoints.php');
+include_once(dirname(__FILE__) . '/TermsCondition.php');
+include_once(dirname(__FILE__) . '/DepositPayment.php');
+include_once(dirname(__FILE__) . '/Gatepass.php');
+include_once(dirname(__FILE__) . '/GatepassItem.php');
+include_once(dirname(__FILE__) . '/Translations.php');
+include_once(dirname(__FILE__) . '/Vehicle.php');
+include_once(dirname(__FILE__) . '/VehicleRepair.php');
+include_once(dirname(__FILE__) . '/VehicleBreakdown.php');
+include_once(dirname(__FILE__) . '/TransportDetail.php');
+include_once(dirname(__FILE__) . '/TransportSettlement.php');
+include_once(dirname(__FILE__) . '/TripManagement.php');
+include_once(dirname(__FILE__) . '/TripSettlement.php');
+include_once(dirname(__FILE__) . '/VehicleFuel.php');
+include_once(dirname(__FILE__) . '/SupplierMaster.php');
+include_once(dirname(__FILE__) . '/SupplierInvoice.php');
+include_once(dirname(__FILE__) . '/SupplierInvoiceItem.php');
+
+
+
+// Initialize session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    @session_start();
+}
+
+
+
+function dd($data)
+{
+
+    var_dump($data);
+
+    exit();
+}
+
+function redirect($url)
+{
+
+    $string = '<script type="text/javascript">';
+
+    $string .= 'window.location = "' . $url . '"';
+
+    $string .= '</script>';
+
+
+
+    echo $string;
+
+    exit();
+}

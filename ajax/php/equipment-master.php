@@ -1,0 +1,772 @@
+<?php
+
+// Suppress PHP warnings/notices from corrupting JSON output
+error_reporting(1);
+ini_set('display_errors', 1);
+
+include '../../class/include.php';
+header('Content-Type: application/json; charset=UTF-8');
+
+// Create new equipment
+if (isset($_POST['create'])) {
+
+    // Check if code already exists
+    $db = Database::getInstance();
+    $codeCheck = "SELECT id FROM equipment WHERE code = '{$_POST['code']}'";
+    $existingEquipment = mysqli_fetch_assoc($db->readQuery($codeCheck));
+
+    if ($existingEquipment) {
+        echo json_encode(["status" => "duplicate", "message" => "Equipment code already exists in the system"]);
+        exit();
+    }
+
+    $EQUIPMENT = new Equipment(NULL);
+
+    $EQUIPMENT->code = $_POST['code'];
+    $EQUIPMENT->item_name = strtoupper($_POST['item_name'] ?? '');
+    $EQUIPMENT->category = $_POST['category'] ?? '';
+    $EQUIPMENT->department_id = $_POST['department'] ?? '';
+    $EQUIPMENT->serial_number = $_POST['serial_number'] ?? '';
+    $EQUIPMENT->damage = $_POST['damage'] ?? '';
+    $EQUIPMENT->size = $_POST['size'] ?? '';
+    $EQUIPMENT->rent_one_day = $_POST['rent_one_day'] ?? 0;
+    $EQUIPMENT->deposit_one_day = $_POST['deposit_one_day'] ?? 0;
+    $EQUIPMENT->rent_one_month = $_POST['rent_one_month'] ?? 0;
+    $EQUIPMENT->value = $_POST['value'] ?? 0;
+    $EQUIPMENT->quantity = $_POST['quantity'] ?? 0;
+    $EQUIPMENT->no_sub_items = $_POST['no_sub_items'] ?? 0;
+    $EQUIPMENT->change_value = $_POST['change_value'] ?? 0;
+    $EQUIPMENT->is_fixed_rate = $_POST['is_fixed_rate'] ?? 0;
+    $EQUIPMENT->remark = $_POST['remark'] ?? '';
+
+    // Handle image upload
+    if (isset($_FILES['equipment_image']) && !empty($_FILES['equipment_image']['name'])) {
+        $handle = new Upload($_FILES['equipment_image']);
+        if ($handle->uploaded) {
+            $handle->image_resize = true;
+            $handle->file_new_name_ext = 'jpg';
+            $handle->image_ratio_crop = 'C';
+            $handle->file_new_name_body = 'EQUIP-' . time();
+            $handle->image_x = 600;
+            $handle->image_y = 600;
+            $handle->Process('../../uploads/equipment/');
+
+            if ($handle->processed) {
+                $EQUIPMENT->image_name = $handle->file_dst_name;
+            }
+        }
+    }
+
+    $res = $EQUIPMENT->create();
+
+    // Audit log
+    $AUDIT_LOG = new AuditLog(NULL);
+    $AUDIT_LOG->ref_id = $_POST['code'];
+    $AUDIT_LOG->ref_code = $_POST['code'];
+    $AUDIT_LOG->action = 'CREATE';
+    $AUDIT_LOG->description = 'CREATE EQUIPMENT NO #' . $_POST['code'];
+    $AUDIT_LOG->user_id = isset($_SESSION['id']) ? $_SESSION['id'] : 0;
+    $AUDIT_LOG->created_at = date("Y-m-d H:i:s");
+    $AUDIT_LOG->create();
+
+    if ($res) {
+        echo json_encode(["status" => "success","equipment_id" => $res]  ) ;  
+
+        exit();
+    } else {
+        echo json_encode(["status" => "error"]);
+        exit();
+    }
+}
+
+// Update equipment
+if (isset($_POST['update'])) {
+
+    // Check if code already exists (excluding current equipment)
+    $db = Database::getInstance();
+    $codeCheck = "SELECT id FROM equipment WHERE code = '{$_POST['code']}' AND id != '{$_POST['equipment_id']}'";
+    $existingEquipment = mysqli_fetch_assoc($db->readQuery($codeCheck));
+
+    if ($existingEquipment) {
+        echo json_encode(["status" => "duplicate", "message" => "Equipment code already exists in the system"]);
+        exit();
+    }
+
+    $EQUIPMENT = new Equipment($_POST['equipment_id']);
+
+    $EQUIPMENT->code = $_POST['code'];
+    $EQUIPMENT->item_name = strtoupper($_POST['item_name'] ?? '');
+    $EQUIPMENT->category = $_POST['category'] ?? '';
+    $EQUIPMENT->department_id = $_POST['department'] ?? '';
+    $EQUIPMENT->serial_number = $_POST['serial_number'] ?? '';
+    $EQUIPMENT->damage = $_POST['damage'] ?? '';
+    $EQUIPMENT->size = $_POST['size'] ?? '';
+    $EQUIPMENT->rent_one_day = $_POST['rent_one_day'] ?? 0;
+    $EQUIPMENT->deposit_one_day = $_POST['deposit_one_day'] ?? 0;
+    $EQUIPMENT->rent_one_month = $_POST['rent_one_month'] ?? 0;
+    $EQUIPMENT->value = $_POST['value'] ?? 0;
+    $EQUIPMENT->quantity = $_POST['quantity'] ?? 0;
+    $EQUIPMENT->no_sub_items = $_POST['no_sub_items'] ?? 0;
+    $EQUIPMENT->change_value = $_POST['change_value'] ?? 0;
+    $EQUIPMENT->is_fixed_rate = $_POST['is_fixed_rate'] ?? 0;
+    $EQUIPMENT->remark = $_POST['remark'] ?? '';
+    $EQUIPMENT->image_name = $_POST['old_image_name'] ?? '';
+
+    // Handle image upload
+    if (isset($_FILES['equipment_image']) && !empty($_FILES['equipment_image']['name'])) {
+        $handle = new Upload($_FILES['equipment_image']);
+        if ($handle->uploaded) {
+            // Delete old image if exists
+            if (!empty($EQUIPMENT->image_name) && file_exists('../../uploads/equipment/' . $EQUIPMENT->image_name)) {
+                unlink('../../uploads/equipment/' . $EQUIPMENT->image_name);
+            }
+
+            $handle->image_resize = true;
+            $handle->file_new_name_ext = 'jpg';
+            $handle->image_ratio_crop = 'C';
+            $handle->file_new_name_body = 'EQUIP-' . time();
+            $handle->image_x = 600;
+            $handle->image_y = 600;
+            $handle->Process('../../uploads/equipment/');
+
+            if ($handle->processed) {
+                $EQUIPMENT->image_name = $handle->file_dst_name;
+            }
+        }
+    }
+
+    $res = $EQUIPMENT->update();
+
+    // Audit log
+    $AUDIT_LOG = new AuditLog(NULL);
+    $AUDIT_LOG->ref_id = $_POST['equipment_id'];
+    $AUDIT_LOG->ref_code = $_POST['code'];
+    $AUDIT_LOG->action = 'UPDATE';
+    $AUDIT_LOG->description = 'UPDATE EQUIPMENT NO #' . $_POST['code'];
+    $AUDIT_LOG->user_id = isset($_SESSION['id']) ? $_SESSION['id'] : 0;
+    $AUDIT_LOG->created_at = date("Y-m-d H:i:s");
+    $AUDIT_LOG->create();
+
+    if ($res) {
+        echo json_encode(["status" => "success"]);
+        exit();
+    } else {
+        echo json_encode(["status" => "error"]);
+        exit();
+    }
+}
+
+// Delete equipment
+if (isset($_POST['delete']) && isset($_POST['id'])) {
+    $EQUIPMENT = new Equipment($_POST['id']);
+
+    // Audit log
+    $AUDIT_LOG = new AuditLog(NULL);
+    $AUDIT_LOG->ref_id = $_POST['id'];
+    $AUDIT_LOG->ref_code = $EQUIPMENT->code;
+    $AUDIT_LOG->action = 'DELETE';
+    $AUDIT_LOG->description = 'DELETE EQUIPMENT NO #' . $EQUIPMENT->code;
+    $AUDIT_LOG->user_id = isset($_SESSION['id']) ? $_SESSION['id'] : 0;
+    $AUDIT_LOG->created_at = date("Y-m-d H:i:s");
+    $AUDIT_LOG->create();
+
+    $res = $EQUIPMENT->delete();
+
+    if ($res) {
+        echo json_encode(['status' => 'success']);
+    } else {
+        echo json_encode(['status' => 'error']);
+    }
+    exit;
+}
+
+// Filter for DataTable
+if (isset($_POST['filter'])) {
+    $db = Database::getInstance();
+
+    // If no pagination params (e.g., plain modal load), return all rows
+    $hasPaging = isset($_REQUEST['start']) || isset($_REQUEST['length']);
+    $start = isset($_REQUEST['start']) ? (int) $_REQUEST['start'] : 0;
+    $length = isset($_REQUEST['length']) ? (int) $_REQUEST['length'] : 1000000;
+    $search = $_REQUEST['search']['value'] ?? '';
+    // Check if sub-equipment only search is enabled
+    $searchSubOnly = isset($_REQUEST['search_sub_only']) && filter_var($_REQUEST['search_sub_only'], FILTER_VALIDATE_BOOLEAN);
+
+    // Total records
+    $totalSql = "SELECT COUNT(*) as total FROM equipment";
+    $totalQuery = $db->readQuery($totalSql);
+    $totalData = mysqli_fetch_assoc($totalQuery)['total'];
+
+    // Search filter
+    $where = "WHERE 1=1";
+    $department_id = $_REQUEST['department_id'] ?? 'all';
+
+    $no_sub_only = isset($_REQUEST['no_sub_only']) && filter_var($_REQUEST['no_sub_only'], FILTER_VALIDATE_BOOLEAN);
+    if ($no_sub_only) {
+        $where .= " AND no_sub_items = 1";
+        if ($department_id !== 'all') {
+            $where .= " AND id IN (SELECT equipment_id FROM sub_equipment WHERE department_id = " . (int)$department_id . ")";
+        }
+    } else {
+        if ($department_id !== 'all') {
+            $where .= " AND department_id = " . (int) $department_id;
+        }
+    }
+
+    if (!empty($search)) {
+        if ($searchSubOnly) {
+            // Search ONLY in sub_equipment
+            $where .= " AND EXISTS (SELECT 1 FROM sub_equipment se WHERE se.equipment_id = equipment.id AND se.code LIKE '%$search%')";
+        } else {
+            // Search ONLY in main equipment fields
+            $where .= " AND (item_name LIKE '%$search%' OR code LIKE '%$search%' OR serial_number LIKE '%$search%' OR category LIKE '%$search%' OR damage LIKE '%$search%' OR size LIKE '%$search%')";
+        }
+    }
+
+    // Filtered records
+    $filteredSql = "SELECT COUNT(*) as filtered FROM equipment $where";
+    $filteredQuery = $db->readQuery($filteredSql);
+    $filteredData = mysqli_fetch_assoc($filteredQuery)['filtered'];
+
+    // Paginated or full query
+    $limitClause = $hasPaging ? "LIMIT $start, $length" : "";
+    $sql = "SELECT * FROM equipment $where ORDER BY id DESC $limitClause";
+    $dataQuery = $db->readQuery($sql);
+
+    $data = [];
+    $key = 1;
+
+    while ($row = mysqli_fetch_assoc($dataQuery)) {
+        // Get category name from equipment_category table
+        $categoryLabel = $row['category'];
+        if (!empty($row['category'])) {
+            $catQuery = "SELECT name FROM equipment_category WHERE id = " . (int) $row['category'];
+            $catResult = $db->readQuery($catQuery);
+            if ($catResult && $catRow = mysqli_fetch_assoc($catResult)) {
+                $categoryLabel = $catRow['name'];
+            }
+        }
+
+        // Get department name and customized quantity
+        $departmentName = '-';
+        $itemQuantity = $row['quantity'];
+
+        if ($no_sub_only && $department_id !== 'all') {
+            // For no_sub items filtered by department, fetch that department's specific stock from sub_equipment
+            $subDeptQuery = "SELECT dm.name, se.qty FROM sub_equipment se
+                             JOIN department_master dm ON se.department_id = dm.id
+                             WHERE se.equipment_id = " . (int)$row['id'] . " AND se.department_id = " . (int)$department_id;
+            $subDeptResult = $db->readQuery($subDeptQuery);
+            if ($subDeptResult && $subDeptRow = mysqli_fetch_assoc($subDeptResult)) {
+                $departmentName = $subDeptRow['name'];
+                $itemQuantity = $subDeptRow['qty'];
+            }
+        } else {
+            $subDeptQuery = "SELECT DISTINCT dm.name FROM sub_equipment se
+                             JOIN department_master dm ON se.department_id = dm.id
+                             WHERE se.equipment_id = " . (int)$row['id'];
+            $subDeptResult = $db->readQuery($subDeptQuery);
+            $deptNames = [];
+            if ($subDeptResult) {
+                while ($subDeptRow = mysqli_fetch_assoc($subDeptResult)) {
+                    $deptNames[] = $subDeptRow['name'];
+                }
+            }
+            if (count($deptNames) > 0) {
+                $departmentName = implode('<br>', $deptNames);
+            } elseif (!empty($row['department_id'])) {
+                $deptQuery = "SELECT name FROM department_master WHERE id = " . (int) $row['department_id'];
+                $deptResult = $db->readQuery($deptQuery);
+                if ($deptResult && $deptRow = mysqli_fetch_assoc($deptResult)) {
+                    $departmentName = $deptRow['name'];
+                }
+            }
+        }
+
+        $nestedData = [
+            "key" => $key,
+            "id" => $row['id'],
+            "code" => $row['code'],
+            "item_name" => $row['item_name'],
+            "category" => $row['category'],
+            "department_id" => $row['department_id'],
+            "department_name" => $departmentName,
+            "category_label" => $categoryLabel,
+            "serial_number" => $row['serial_number'],
+            "damage" => $row['damage'],
+            "size" => $row['size'],
+            "rent_one_day" => $row['rent_one_day'],
+            "deposit_one_day" => $row['deposit_one_day'],
+            "rent_one_month" => $row['rent_one_month'],
+            "value" => $row['value'],
+            "quantity" => $itemQuantity,
+            "no_sub_items" => $row['no_sub_items'],
+            "change_value" => $row['change_value'] ?? 0,
+            "is_fixed_rate" => $row['is_fixed_rate'] ?? 0,
+            "image_name" => $row['image_name'],
+            "remark" => $row['remark'],
+            "has_sub_match" => false, 
+            "search_term" => $search
+        ];
+
+        // Check for sub-equipment match if search is active
+        if (!empty($search) && $searchSubOnly) {
+            // Only flag as match if sub-search is strictly enabled and found
+             $nestedData['has_sub_match'] = true;
+        }
+
+        $data[] = $nestedData;
+        $key++;
+    }
+
+    echo json_encode([
+        "draw" => intval($_REQUEST['draw'] ?? 1),
+        "recordsTotal" => intval($totalData),
+        "recordsFiltered" => intval($filteredData),
+        "data" => $data
+    ]);
+    exit;
+}
+
+// Print Stock Data (Fetch All)
+if (isset($_POST['action']) && $_POST['action'] == 'print_stock') {
+    $db = Database::getInstance();
+    
+    $search = $_POST['search'] ?? '';
+    $searchSubOnly = isset($_POST['search_sub_only']) && filter_var($_POST['search_sub_only'], FILTER_VALIDATE_BOOLEAN);
+    $department_id = $_POST['department_id'] ?? 'all';
+
+    $no_sub_only = isset($_POST['no_sub_only']) && filter_var($_POST['no_sub_only'], FILTER_VALIDATE_BOOLEAN);
+    $where = "WHERE 1=1";
+    if ($no_sub_only) {
+        $where .= " AND no_sub_items = 1";
+        if ($department_id !== 'all') {
+            $where .= " AND id IN (SELECT equipment_id FROM sub_equipment se WHERE se.department_id = " . (int) $department_id . ")";
+        }
+    } else {
+        if ($department_id !== 'all') {
+            $where .= " AND department_id = " . (int) $department_id;
+        }
+    }
+
+    if (!empty($search)) {
+        if ($searchSubOnly) {
+            $where .= " AND EXISTS (SELECT 1 FROM sub_equipment se WHERE se.equipment_id = equipment.id AND se.code LIKE '%$search%')";
+        } else {
+            $where .= " AND (item_name LIKE '%$search%' OR code LIKE '%$search%' OR serial_number LIKE '%$search%' OR category LIKE '%$search%' OR damage LIKE '%$search%' OR size LIKE '%$search%')";
+        }
+    }
+
+    $sql = "SELECT * FROM equipment $where ORDER BY id DESC";
+    $result = $db->readQuery($sql);
+    $data = [];
+
+    while ($row = mysqli_fetch_assoc($result)) {
+        // Get category name
+        $categoryLabel = $row['category'];
+        if (!empty($row['category'])) {
+            $catQuery = "SELECT name FROM equipment_category WHERE id = " . (int) $row['category'];
+            $catResult = $db->readQuery($catQuery);
+            if ($catResult && $catRow = mysqli_fetch_assoc($catResult)) {
+                $categoryLabel = $catRow['name'];
+            }
+        }
+
+        // Get department name and customized quantity
+        $departmentName = '-';
+        $itemQuantity = $row['quantity'];
+
+        if ($no_sub_only && $department_id !== 'all') {
+            $subDeptQuery = "SELECT dm.name, se.qty FROM sub_equipment se
+                             JOIN department_master dm ON se.department_id = dm.id
+                             WHERE se.equipment_id = " . (int) $row['id'] . " AND se.department_id = " . (int) $department_id;
+            $subDeptResult = $db->readQuery($subDeptQuery);
+            if ($subDeptResult && $subDeptRow = mysqli_fetch_assoc($subDeptResult)) {
+                $departmentName = $subDeptRow['name'];
+                $itemQuantity = $subDeptRow['qty'];
+            }
+        } else {
+            $subDeptQuery = "SELECT DISTINCT dm.name FROM sub_equipment se
+                             JOIN department_master dm ON se.department_id = dm.id
+                             WHERE se.equipment_id = " . (int)$row['id'];
+            $subDeptResult = $db->readQuery($subDeptQuery);
+            $deptNames = [];
+            if ($subDeptResult) {
+                while ($subDeptRow = mysqli_fetch_assoc($subDeptResult)) {
+                    $deptNames[] = $subDeptRow['name'];
+                }
+            }
+            if (count($deptNames) > 0) {
+                $departmentName = implode(', ', $deptNames);
+            } elseif (!empty($row['department_id'])) {
+                $deptQuery = "SELECT name FROM department_master WHERE id = " . (int) $row['department_id'];
+                $deptResult = $db->readQuery($deptQuery);
+                if ($deptResult && $deptRow = mysqli_fetch_assoc($deptResult)) {
+                    $departmentName = $deptRow['name'];
+                }
+            }
+        }
+
+        // Get sub-equipment if exists
+        $subItems = [];
+        if ($row['no_sub_items'] == 0) {
+             // Only fetch if searching generally or if sub-search is causing this to appear
+             // If searchSubOnly is TRUE, we might only want to show the MATCHING sub items?
+             // But usually "print stock" means "print what I see" or "print full details".
+             // The user request "sub equpemnt also need show in bottom" implies full detail for the listed item.
+             // If I search for "S-001", main item appears. I should probably show all subs or just S-001?
+             // "show in bottom the main item". I will show ALL sub-items for the main item for completeness, 
+             // unless strict filtering is desired. Let's assume ALL sub-items for now for context.
+             
+             $subSql = "SELECT * FROM sub_equipment WHERE equipment_id = '" . $row['id'] . "' ORDER BY id ASC";
+             $subResult = $db->readQuery($subSql);
+             while ($subRow = mysqli_fetch_assoc($subResult)) {
+                 $subItems[] = [
+                     "code" => $subRow['code'],
+                     "rental_status" => $subRow['rental_status']
+                 ];
+             }
+        }
+
+        // Get department-wise stock breakdown
+        $deptStock = [];
+        $deptSql = "SELECT dm.name as department_name, se.qty, se.department_id,
+                    (
+                        SELECT COALESCE(SUM(eri.quantity - (SELECT COALESCE(SUM(return_qty),0) FROM equipment_rent_returns WHERE rent_item_id = eri.id)), 0)
+                        FROM equipment_rent_items eri 
+                        WHERE eri.equipment_id = se.equipment_id 
+                        AND eri.department_id = se.department_id 
+                        AND eri.status = 'rented'
+                        AND (eri.sub_equipment_id IS NULL OR eri.sub_equipment_id = 0)
+                    ) as dynamic_rented_qty
+                    FROM sub_equipment se
+                    JOIN department_master dm ON se.department_id = dm.id
+                    WHERE se.equipment_id = " . (int)$row['id'];
+        
+        $deptResult = $db->readQuery($deptSql);
+        if ($row['no_sub_items'] == 1) {
+            // Non-sub-equipment: use dynamic rented qty calculation
+            while ($deptRow = mysqli_fetch_assoc($deptResult)) {
+                $qty = (float)$deptRow['qty'];
+                $rented = (float)$deptRow['dynamic_rented_qty'];
+                $deptStock[] = [
+                    'department_name' => $deptRow['department_name'],
+                    'qty' => $qty,
+                    'available_qty' => max(0, $qty - $rented),
+                    'rented_qty' => $rented
+                ];
+            }
+        } else {
+            // Sub-equipment: count by status
+            $subDeptSql = "SELECT dm.name as department_name,
+                           COUNT(*) as total,
+                           SUM(CASE WHEN rental_status IN ('available', 'returned') THEN 1 ELSE 0 END) as available,
+                           SUM(CASE WHEN rental_status IN ('rent', 'rented') THEN 1 ELSE 0 END) as rented,
+                           SUM(CASE WHEN rental_status = 'repair' THEN 1 ELSE 0 END) as repair,
+                           SUM(CASE WHEN rental_status = 'damage' THEN 1 ELSE 0 END) as damage
+                           FROM sub_equipment se
+                           JOIN department_master dm ON se.department_id = dm.id
+                           WHERE se.equipment_id = " . (int)$row['id'] . "
+                           GROUP BY se.department_id";
+            $subDeptResult = $db->readQuery($subDeptSql);
+            while ($subDeptRow = mysqli_fetch_assoc($subDeptResult)) {
+                $deptStock[] = [
+                    'department_name' => $subDeptRow['department_name'],
+                    'qty' => $subDeptRow['total'],
+                    'available_qty' => $subDeptRow['available'],
+                    'rented_qty' => $subDeptRow['rented'],
+                    'repair_qty' => $subDeptRow['repair'],
+                    'damage_qty' => $subDeptRow['damage']
+                ];
+            }
+        }
+
+        $data[] = [
+            "code" => $row['code'],
+            "item_name" => $row['item_name'],
+            "category_label" => $categoryLabel,
+            "department_name" => $departmentName,
+            "serial_number" => $row['serial_number'],
+            "size" => $row['size'],
+            "value" => $row['value'],
+            "deposit_one_day" => $row['deposit_one_day'],
+            "quantity" => $itemQuantity,
+            "rent_one_day" => $row['rent_one_day'],
+            "rent_one_month" => $row['rent_one_month'],
+            "sub_items" => $subItems,
+            "department_stock" => $deptStock
+        ];
+    }
+
+    echo json_encode([
+        "status" => "success",
+        "data" => $data
+    ]);
+    exit;
+}
+
+// ... skip intermediate blocks ...
+
+// Get sub-equipment by equipment_id (and availability summary for no-sub-items)
+if (isset($_POST['action']) && $_POST['action'] === 'get_sub_equipment') {
+    $equipment_id = isset($_POST['equipment_id']) ? (int) $_POST['equipment_id'] : 0;
+    $searchSubOnly = isset($_POST['search_sub_only']) && filter_var($_POST['search_sub_only'], FILTER_VALIDATE_BOOLEAN);
+
+    if ($equipment_id > 0) {
+        $db = Database::getInstance();
+
+        // Check if equipment has no sub items
+        $equipRow = mysqli_fetch_assoc($db->readQuery("SELECT quantity, no_sub_items FROM equipment WHERE id = $equipment_id"));
+        $isNoSub = ($equipRow['no_sub_items'] ?? 0) == 1;
+
+        $subEquipments = [];
+        $meta = [];
+
+        if ($isNoSub) {
+            // Fetch department stock from sub_equipment table
+            $deptStock = [];
+            $totalQty = 0;
+            $rentedQty = 0;
+            $deptSql = "SELECT dm.name, se.qty, se.department_id,
+                        (
+                            SELECT COALESCE(SUM(eri.quantity - (SELECT COALESCE(SUM(return_qty),0) FROM equipment_rent_returns WHERE rent_item_id = eri.id)), 0)
+                            FROM equipment_rent_items eri 
+                            WHERE eri.equipment_id = se.equipment_id 
+                            AND eri.department_id = se.department_id 
+                            AND eri.status = 'rented'
+                            AND (eri.sub_equipment_id IS NULL OR eri.sub_equipment_id = 0)
+                        ) as dynamic_rented_qty
+                        FROM sub_equipment se
+                        JOIN department_master dm ON se.department_id = dm.id
+                        WHERE se.equipment_id = $equipment_id";
+            $deptResult = $db->readQuery($deptSql);
+            while ($deptRow = mysqli_fetch_assoc($deptResult)) {
+                $deptQty = (float)$deptRow['qty'];
+                $deptRented = (float)$deptRow['dynamic_rented_qty'];
+                $available = $deptQty - $deptRented;
+                $totalQty += $deptQty;
+                $rentedQty += $deptRented;
+                $deptStock[] = [
+                    'department_id' => $deptRow['department_id'],
+                    'department_name' => $deptRow['name'],
+                    'qty' => $deptQty,
+                    'rented_qty' => $deptRented,
+                    'available_qty' => max(0, $available)
+                ];
+            }
+            $availableQty = max(0, $totalQty - $rentedQty);
+
+            $meta = [
+                'no_sub_items' => 1,
+                'available_qty' => $availableQty,
+                'rented_qty' => $rentedQty,
+                'total_qty' => $totalQty,
+                'department_stock' => $deptStock
+            ];
+        } else {
+            // Build summary meta for items WITH sub-equipment
+            $subDeptSql = "SELECT dm.id as department_id, dm.name as department_name,
+                           COUNT(*) as total,
+                           SUM(CASE WHEN rental_status IN ('available', 'returned') THEN 1 ELSE 0 END) as available,
+                           SUM(CASE WHEN rental_status IN ('rent', 'rented') THEN 1 ELSE 0 END) as rented,
+                           SUM(CASE WHEN rental_status = 'repair' THEN 1 ELSE 0 END) as repair,
+                           SUM(CASE WHEN rental_status = 'damage' THEN 1 ELSE 0 END) as damage
+                           FROM sub_equipment se
+                           JOIN department_master dm ON se.department_id = dm.id
+                           WHERE se.equipment_id = $equipment_id
+                           GROUP BY se.department_id";
+            $subDeptResult = $db->readQuery($subDeptSql);
+            $deptStock = [];
+            $totalQty = 0;
+            $availableQty = 0;
+            $rentedQty = 0;
+            $repairQty = 0;
+            $damageQty = 0;
+            while ($subDeptRow = mysqli_fetch_assoc($subDeptResult)) {
+                $totalQty += (int)$subDeptRow['total'];
+                $availableQty += (int)$subDeptRow['available'];
+                $rentedQty += (int)$subDeptRow['rented'];
+                $repairQty += (int)$subDeptRow['repair'];
+                $damageQty += (int)$subDeptRow['damage'];
+                $deptStock[] = [
+                    'department_id' => $subDeptRow['department_id'],
+                    'department_name' => $subDeptRow['department_name'],
+                    'qty' => (int)$subDeptRow['total'],
+                    'available_qty' => (int)$subDeptRow['available'],
+                    'rented_qty' => (int)$subDeptRow['rented'],
+                    'repair_qty' => (int)$subDeptRow['repair'],
+                    'damage_qty' => (int)$subDeptRow['damage']
+                ];
+            }
+            $meta = [
+                'no_sub_items' => 0,
+                'total_qty' => $totalQty,
+                'available_qty' => $availableQty,
+                'rented_qty' => $rentedQty,
+                'repair_qty' => $repairQty,
+                'damage_qty' => $damageQty,
+                'department_stock' => $deptStock
+            ];
+
+            $sql = "SELECT
+                        se.id,
+                        se.equipment_id,
+                        se.code,
+                        se.rental_status,
+                        se.is_repair,
+                        (SELECT eri.rent_id FROM equipment_rent_items eri WHERE eri.sub_equipment_id = se.id AND eri.status = 'rented' ORDER BY eri.id DESC LIMIT 1) AS active_rent_id,
+                        (SELECT er.bill_number FROM equipment_rent er WHERE er.id = (SELECT eri2.rent_id FROM equipment_rent_items eri2 WHERE eri2.sub_equipment_id = se.id AND eri2.status = 'rented' ORDER BY eri2.id DESC LIMIT 1)) AS active_bill_number,
+                        (SELECT cm.name FROM equipment_rent er2 LEFT JOIN customer_master cm ON er2.customer_id = cm.id WHERE er2.id = (SELECT eri3.rent_id FROM equipment_rent_items eri3 WHERE eri3.sub_equipment_id = se.id AND eri3.status = 'rented' ORDER BY eri3.id DESC LIMIT 1)) AS active_customer_name,
+                        (SELECT rj.id FROM repair_jobs rj WHERE TRIM(rj.machine_code) = TRIM(se.code) AND rj.job_status NOT IN ('delivered') ORDER BY rj.id DESC LIMIT 1) AS active_repair_job_id
+                    FROM sub_equipment se
+                    WHERE se.equipment_id = $equipment_id";
+            
+            // Logic:
+            // If strict 'search_sub_only' is ON -> Filter sub-equipments by search term.
+            // If 'search_sub_only' is OFF -> Do NOT filter sub-equipments by search term (show all for this parent).
+            // (User searched for main item, so they presumably want to see all its stock)
+            
+            if ($searchSubOnly && isset($_POST['search']) && !empty($_POST['search'])) {
+                $search = mysqli_real_escape_string($db->DB_CON, $_POST['search']);
+                $sql .= " AND se.code LIKE '%$search%'";
+            }
+            
+            $sql .= " ORDER BY se.id ASC";
+            $result = $db->readQuery($sql);
+            while ($row = mysqli_fetch_assoc($result)) {
+                $subEquipments[] = [
+                    'id' => $row['id'],
+                    'equipment_id' => $row['equipment_id'],
+                    'code' => $row['code'],
+                    'rental_status' => $row['rental_status'],
+                    'is_repair' => $row['is_repair'],
+                    'active_rent_id' => $row['active_rent_id'],
+                    'active_bill_number' => $row['active_bill_number'],
+                    'active_customer_name' => $row['active_customer_name'],
+                    'active_repair_job_id' => $row['active_repair_job_id']
+                ];
+            }
+        }
+
+        echo json_encode([
+            "status" => "success",
+            "data" => $subEquipments,
+            "meta" => $meta
+        ]);
+    } else {
+        echo json_encode([
+            "status" => "error",
+            "message" => "Equipment ID required"
+        ]);
+    }
+    exit;
+}
+
+// Get equipment totals for summary cards
+if (isset($_POST['action']) && $_POST['action'] === 'get_equipment_totals') {
+    $db = Database::getInstance();
+
+    // Total equipment count
+    $where = "WHERE 1=1";
+    $department_id = $_POST['department_id'] ?? 'all';
+    if ($department_id !== 'all') {
+        $where .= " AND department_id = " . (int) $department_id;
+    }
+
+    $no_sub_only = isset($_POST['no_sub_only']) && filter_var($_POST['no_sub_only'], FILTER_VALIDATE_BOOLEAN);
+    if ($no_sub_only) {
+        $where .= " AND no_sub_items = 1";
+    }
+
+    $totalSql = "SELECT COUNT(*) as total FROM equipment $where";
+    $totalResult = $db->readQuery($totalSql);
+    $total = mysqli_fetch_assoc($totalResult)['total'] ?? 0;
+
+    echo json_encode([
+        "status" => "success",
+        "data" => [
+            "total" => (int) $total
+        ]
+    ]);
+    exit;
+}
+
+// Get rented invoices for bulk equipment (no sub items)
+if (isset($_POST['action']) && $_POST['action'] === 'get_rented_invoices') {
+    $equipment_id = isset($_POST['equipment_id']) ? (int)$_POST['equipment_id'] : 0;
+    
+    if ($equipment_id > 0) {
+        $db = Database::getInstance();
+        
+        $departmentFilter = "";
+        if (!empty($_POST['department_id'])) {
+             $departmentFilter = "AND eri.department_id = " . (int)$_POST['department_id'];
+        }
+
+        $sql = "SELECT 
+                    eri.id,
+                    eri.rent_id,
+                    eri.quantity,
+                    eri.created_at as rental_date,
+                    er.bill_number,
+                    cm.name AS customer_name,
+                    (SELECT COALESCE(SUM(err.return_qty), 0) FROM equipment_rent_returns err WHERE err.rent_item_id = eri.id) AS returned_qty
+                FROM equipment_rent_items eri
+                JOIN equipment_rent er ON eri.rent_id = er.id
+                LEFT JOIN customer_master cm ON er.customer_id = cm.id
+                WHERE eri.equipment_id = $equipment_id 
+                $departmentFilter
+                AND eri.status = 'rented' 
+                AND (eri.sub_equipment_id IS NULL OR eri.sub_equipment_id = 0)
+                HAVING (eri.quantity - returned_qty) > 0
+                ORDER BY er.bill_number ASC";
+                
+        $result = $db->readQuery($sql);
+        $data = [];
+        
+        while ($row = mysqli_fetch_assoc($result)) {
+            $pendingQty = (float)$row['quantity'] - (float)$row['returned_qty'];
+            $data[] = [
+                'id' => $row['id'],
+                'rent_id' => $row['rent_id'],
+                'bill_number' => $row['bill_number'],
+                'customer_name' => $row['customer_name'] ?? 'Unknown',
+                'quantity' => $pendingQty,
+                'returned_qty' => (float)$row['returned_qty'],
+                'date' => date('Y-m-d H:i', strtotime($row['rental_date']))
+            ];
+        }
+        
+        echo json_encode([
+            "status" => "success",
+            "data" => $data
+        ]);
+    } else {
+        echo json_encode(["status" => "error", "message" => "Invalid Equipment ID"]);
+    }
+    exit;
+}
+
+// Get equipment quantity (for refreshing after stock changes)
+if (isset($_POST['action']) && $_POST['action'] === 'get_equipment_quantity') {
+    $equipment_id = isset($_POST['equipment_id']) ? (int)$_POST['equipment_id'] : 0;
+    
+    if ($equipment_id > 0) {
+        $db = Database::getInstance();
+        $query = "SELECT quantity FROM equipment WHERE id = $equipment_id";
+        $result = mysqli_fetch_assoc($db->readQuery($query));
+        
+        if ($result) {
+            echo json_encode([
+                "status" => "success",
+                "quantity" => $result['quantity']
+            ]);
+        } else {
+            echo json_encode(["status" => "error", "message" => "Equipment not found"]);
+        }
+    } else {
+        echo json_encode(["status" => "error", "message" => "Invalid Equipment ID"]);
+    }
+    exit;
+}
+

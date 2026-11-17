@@ -1,0 +1,93 @@
+<?php
+class Database
+{
+    private static $instance = null;
+
+    private $host;
+    private $name;
+    private $user;
+    private $password;
+
+    public $DB_CON;
+
+    private function __construct()
+    {
+        // Detect environment
+        if ($this->isLocalServer()) {
+
+            // Local DB
+            $this->host = 'localhost';
+            $this->name = 'ekamuthu-enterprises';
+            $this->user = 'root';
+            $this->password = '';
+        } else {
+
+            // Online DB settings
+            $this->host = 'localhost';
+            $this->name = 'chalcepi_dinesh_construction';
+            $this->user = 'chalcepi_dinesh_construction';
+            $this->password = 'ncj2HXofz_KDsXGv';
+            $this->DB_CON = '';
+        }
+
+        // Ensure all PHP date() calls use local time (DB timestamps rely on this)
+        date_default_timezone_set('Asia/Colombo');
+
+        // Create ONE connection only
+        $this->DB_CON = mysqli_connect($this->host, $this->user, $this->password, $this->name);
+
+        if (!$this->DB_CON) {
+            die("Database connection failed: " . mysqli_connect_error());
+        }
+
+        // Set UTF-8 charset for Sinhala/Unicode support
+        mysqli_set_charset($this->DB_CON, "utf8mb4");
+    }
+
+    // ✔ Singleton: Only 1 DB connection in full system
+    public static function getInstance()
+    {
+        if (self::$instance === null) {
+            self::$instance = new Database();
+        }
+        return self::$instance;
+    }
+
+    // Detect local or live server
+    private function isLocalServer()
+    {
+        $host = $_SERVER['SERVER_NAME'] ?? 'localhost';
+        if (in_array($host, ['localhost', '127.0.0.1'])) {
+            return true;
+        }
+        // Client PC accessed from other machines on the office LAN (e.g. 192.168.1.10)
+        return filter_var($host, FILTER_VALIDATE_IP) !== false
+            && filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE) === false;
+    }
+
+    // Run query
+    public function readQuery($query)
+    {
+        $result = mysqli_query($this->DB_CON, $query);
+
+        if (!$result) {
+            die("SQL Error: " . mysqli_error($this->DB_CON) . "<br>Query: " . $query);
+        }
+
+        return $result;
+    }
+
+    // Escape text
+    public function escapeString($string)
+    {
+        return mysqli_real_escape_string($this->DB_CON, $string);
+    }
+
+    // ✔ Auto close connection when script ends
+    public function __destruct()
+    {
+        if ($this->DB_CON) {
+            mysqli_close($this->DB_CON);
+        }
+    }
+}

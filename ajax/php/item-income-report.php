@@ -1,0 +1,179 @@
+<?php
+include '../../class/include.php';
+header('Content-Type: application/json; charset=UTF-8');
+
+if (isset($_POST['action']) && $_POST['action'] === 'get_item_income_report') {
+    $from_date = $_POST['from_date'] ?? date('Y-m-d');
+    $to_date   = $_POST['to_date'] ?? date('Y-m-d');
+    $equipment_code = trim($_POST['equipment_code'] ?? '');
+
+    $db = Database::getInstance();
+    $equipment_code = $db->escapeString($equipment_code);
+    $equipmentWhere = $equipment_code !== '' ? " AND (e.code LIKE '%$equipment_code%' OR se.code LIKE '%$equipment_code%')" : '';
+
+    // Billable days (matching rent calculation day logic) multiplied by returned quantity
+    $billableDaysExpr = "GREATEST(1, CEILING(TIMESTAMPDIFF(SECOND, eri.rental_date, err.return_date) / 86400))";
+
+    // Aggregate returns per rent item to avoid double counting and bring total_rent_amount from rent item table
+    $query = "SELECT 
+                    e.id AS equipment_id,
+                    e.code AS equipment_code,
+                    e.item_name AS equipment_name,
+                    e.value AS equipment_value,
+                    eri.sub_equipment_id,
+                    se.code AS sub_equipment_code,
+                    COALESCE(se.value, 0) AS sub_equipment_value,
+                    SUM(COALESCE(ret.return_qty, 0)) AS rented_qty,
+                    SUM(COALESCE(ret.billable_days, 0)) AS billable_days,
+                    SUM(COALESCE(eri.total_rent_amount, 0)) AS rent_value
+                FROM equipment_rent_items eri
+                INNER JOIN (
+                    SELECT err.rent_item_id,
+                           SUM(err.return_qty) AS return_qty,
+                           SUM($billableDaysExpr * err.return_qty) AS billable_days
+                    FROM equipment_rent_returns err
+                    INNER JOIN equipment_rent_items eri ON err.rent_item_id = eri.id
+                    WHERE err.return_date BETWEEN '$from_date' AND '$to_date'
+                    GROUP BY err.rent_item_id
+                ) ret ON ret.rent_item_id = eri.id
+                LEFT JOIN equipment e ON eri.equipment_id = e.id
+                LEFT JOIN sub_equipment se ON eri.sub_equipment_id = se.id
+                WHERE 1 = 1 $equipmentWhere
+                GROUP BY e.id, eri.sub_equipment_id
+                ORDER BY e.code ASC, se.code ASC";
+
+    $result = $db->readQuery($query);
+
+    // Build equipment map
+    $equipmentMap = [];
+    while ($row = mysqli_fetch_assoc($result)) {
+        $eqId = $row['equipment_id'];
+        if (!isset($equipmentMap[$eqId])) {
+            $equipmentMap[$eqId] = [
+                'equipment_id' => $eqId,
+                'equipment_code' => $row['equipment_code'],
+                'equipment_name' => $row['equipment_name'],
+                'sub_equipment' => []
+            ];
+        }
+
+        // Prefer sub_equipment value; if null/zero fallback to equipment value
+        $value = floatval($row['sub_equipment_value']);
+        if ($value == 0) {
+            $value = floatval($row['equipment_value'] ?? 0);
+        }
+
+        $equipmentMap[$eqId]['sub_equipment'][] = [
+            'sub_equipment_id' => $row['sub_equipment_id'],
+            'sub_equipment_code' => $row['sub_equipment_code'] ?? null,
+            'value' => $value,
+            'rented_qty' => intval($row['rented_qty']),
+            'billable_days' => intval($row['billable_days']),
+            'rent_value' => floatval($row['rent_value']),
+            'repair_qty' => 0,
+            'repair_cost' => 0,
+            'profit' => 0,
+            'roi' => 0
+        ];
+    }
+
+    // Repair data for company items grouped by machine_code (= sub_equipment.code)
+    $repairQuery = "SELECT 
+                        rj.machine_code,
+                        COUNT(rj.id) AS repair_qty,
+                        SUM(COALESCE(rj.total_cost, 0)) AS repair_cost
+                    FROM repair_jobs rj
+                    WHERE rj.item_type = 'company'
+                    AND rj.created_at BETWEEN '$from_date 00:00:00' AND '$to_date 23:59:59'
+                    AND rj.machine_code != ''
+                    " . ($equipment_code !== '' ? " AND rj.machine_code LIKE '%$equipment_code%'" : '') . "
+                    GROUP BY rj.machine_code";
+
+    $repairResult = $db->readQuery($repairQuery);
+    $repairMap = [];
+    while ($rRow = mysqli_fetch_assoc($repairResult)) {
+        $repairMap[$rRow['machine_code']] = [
+            'repair_qty' => intval($rRow['repair_qty']),
+            'repair_cost' => floatval($rRow['repair_cost'])
+        ];
+    }
+
+    // Merge repair data and calculate profit / ROI
+    $totalValue = 0;
+    $totalRentValue = 0;
+    $totalRepairCost = 0;
+    $totalProfit = 0;
+    $totalRentedQty = 0;
+    $totalBillableDays = 0;
+
+    foreach ($equipmentMap as &$eq) {
+        $eqTotals = ['value' => 0, 'rented_qty' => 0, 'billable_days' => 0, 'rent_value' => 0, 'repair_qty' => 0, 'repair_cost' => 0];
+
+        foreach ($eq['sub_equipment'] as &$se) {
+            $seCode = $se['sub_equipment_code'];
+            if ($seCode && isset($repairMap[$seCode])) {
+                $se['repair_qty'] = $repairMap[$seCode]['repair_qty'];
+                $se['repair_cost'] = $repairMap[$seCode]['repair_cost'];
+            }
+
+            $se['rent_value'] = round($se['rent_value'], 2);
+            $se['repair_cost'] = round($se['repair_cost'], 2);
+            $se['profit'] = round($se['rent_value'] - $se['repair_cost'], 2);
+            // ROI based on value: (profit / value) * 100
+            $se['roi'] = ($se['value'] > 0) ? round(($se['profit'] / $se['value']) * 100, 2) : 0;
+
+            $eqTotals['value'] += $se['value'];
+            $eqTotals['rented_qty'] += $se['rented_qty'];
+            $eqTotals['billable_days'] += $se['billable_days'];
+            $eqTotals['rent_value'] += $se['rent_value'];
+            $eqTotals['repair_qty'] += $se['repair_qty'];
+            $eqTotals['repair_cost'] += $se['repair_cost'];
+        }
+        unset($se);
+
+        $eqProfit = $eqTotals['rent_value'] - $eqTotals['repair_cost'];
+        $eq['totals'] = [
+            'value' => round($eqTotals['value'], 2),
+            'rented_qty' => $eqTotals['rented_qty'],
+            'billable_days' => $eqTotals['billable_days'],
+            'rent_value' => round($eqTotals['rent_value'], 2),
+            'repair_qty' => $eqTotals['repair_qty'],
+            'repair_cost' => round($eqTotals['repair_cost'], 2),
+            'profit' => round($eqProfit, 2),
+            // ROI based on value: (profit / value) * 100
+            'roi' => ($eqTotals['value'] > 0) ? round(($eqProfit / $eqTotals['value']) * 100, 2) : 0
+        ];
+
+        $totalValue += $eqTotals['value'];
+        $totalRentedQty += $eqTotals['rented_qty'];
+        $totalBillableDays += $eqTotals['billable_days'];
+        $totalRentValue += $eqTotals['rent_value'];
+        $totalRepairCost += $eqTotals['repair_cost'];
+        $totalProfit += $eqProfit;
+    }
+    unset($eq);
+
+    // Sort equipment by ROI descending
+    usort($equipmentMap, function ($a, $b) {
+        return ($b['totals']['roi'] ?? 0) <=> ($a['totals']['roi'] ?? 0);
+    });
+
+    echo json_encode([
+        'status' => 'success',
+        'data' => array_values($equipmentMap),
+        'summary' => [
+            'total_value' => number_format($totalValue, 2),
+            'total_rented_qty' => number_format($totalRentedQty, 0),
+            'total_billable_days' => number_format($totalBillableDays, 0),
+            'total_rent_value' => number_format($totalRentValue, 2),
+            'total_repair_cost' => number_format($totalRepairCost, 2),
+            'total_profit' => number_format($totalProfit, 2),
+            // ROI based on total value: (profit / value) * 100
+            'total_roi' => ($totalValue > 0) ? number_format(($totalProfit / $totalValue) * 100, 2) : '0.00'
+        ]
+    ]);
+    exit;
+}
+
+http_response_code(400);
+echo json_encode(['status' => 'error', 'message' => 'Invalid action']);

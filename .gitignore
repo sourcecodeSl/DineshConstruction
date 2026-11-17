@@ -1,0 +1,28 @@
+# User uploads & backups (any level, e.g. ekamuthu-enterprises/uploads)
+uploads/
+upload/
+backup/
+!pos-system/public/uploads/products/.keep
+
+# Logs & server/deploy state
+error_log
+*.log
+.ftp-deploy-sync-state.json
+.ftpquota
+
+# Laravel (pos-system)
+/pos-system/vendor/
+/pos-system/storage/logs/
+/pos-system/storage/framework/cache/
+/pos-system/storage/framework/sessions/
+/pos-system/storage/framework/views/
+/pos-system/.env
+
+# Local tooling
+/.claude/
+.vscode/
+.DS_Store
+Thumbs.db
+
+/pos-system/bootstrap/cache/*.php
+/assets/js/pages/leaflet-map.init.js

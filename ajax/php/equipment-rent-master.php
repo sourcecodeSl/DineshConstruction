@@ -1,0 +1,2251 @@
+<?php
+
+// Enable logging but keep output clean for JSON responses
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+ini_set('log_errors', 1);
+
+include '../../class/include.php';
+header('Content-Type: application/json; charset=UTF-8');
+
+/**
+ * Upload bank slip file and return relative path
+ */
+function uploadBankSlip($fileData = null, $existingPath = null)
+{
+    if (!$fileData || !isset($fileData['tmp_name']) || $fileData['error'] !== UPLOAD_ERR_OK) {
+        return $existingPath;
+    }
+
+    $allowed = ['jpg', 'jpeg', 'png', 'pdf'];
+    $ext = strtolower(pathinfo($fileData['name'], PATHINFO_EXTENSION));
+    if (!in_array($ext, $allowed)) {
+        return $existingPath;
+    }
+
+    $targetDir = dirname(__FILE__, 3) . '/upload/bank-slips/';
+    if (!is_dir($targetDir)) {
+        mkdir($targetDir, 0755, true);
+    }
+
+    $fileName = 'bank_slip_' . time() . '_' . uniqid() . '.' . $ext;
+    $targetPath = $targetDir . $fileName;
+
+    if (move_uploaded_file($fileData['tmp_name'], $targetPath)) {
+        return 'upload/bank-slips/' . $fileName;
+    }
+
+    return $existingPath;
+}
+
+// Create new equipment rent with items
+if (isset($_POST['create'])) {
+
+    if (empty($_POST['payment_type_id'])) {
+        echo json_encode(["status" => "error", "message" => "Please select a payment method"]);
+        exit();
+    }
+
+    // Check if bill number already exists
+    $db = Database::getInstance();
+    $codeCheck = "SELECT id FROM equipment_rent WHERE bill_number = '{$_POST['code']}'";
+    $existingRent = mysqli_fetch_assoc($db->readQuery($codeCheck));
+
+    if ($existingRent) {
+        echo json_encode(["status" => "duplicate", "message" => "Bill number already exists in the system"]);
+        exit();
+    }
+
+    $bill_number = $_POST['code'];
+
+    // Parse items from JSON
+    $items = json_decode($_POST['items'] ?? '[]', true);
+
+    if (empty($items)) {
+        echo json_encode(["status" => "error", "message" => "Please add at least one equipment item"]);
+        exit();
+    }
+
+    // Amount Validation
+    $totalAmount = 0;
+    foreach ($items as $item) {
+        $totalAmount += (float)($item['amount'] ?? 0);
+    }
+    $isBranchExchange = isset($_POST['is_branch_exchange']) && $_POST['is_branch_exchange'] == 1;
+
+    if ($isBranchExchange && $totalAmount > 0) {
+        echo json_encode(["status" => "error", "message" => "Branch exchange must have zero bill amount"]);
+        exit();
+    }
+    if (!$isBranchExchange && $totalAmount <= 0) {
+        echo json_encode(["status" => "error", "message" => "Normal rentals must have a bill amount greater than zero"]);
+        exit();
+    }
+
+    // Validate all equipment availability before creating
+    foreach ($items as $item) {
+        $EQUIP_CHECK = new Equipment($item['equipment_id']);
+        $requestedQty = (float)($item['quantity'] ?? 1);
+        $deptId = $item['department_id'] ?? null;
+
+        if ($EQUIP_CHECK->no_sub_items == 1) {
+            // Bulk item check
+            if ($deptId) {
+                $avail = SubEquipment::getDepartmentAvailableStock($item['equipment_id'], $deptId, true);
+                if ($requestedQty > $avail) {
+                    echo json_encode([
+                        "status" => "error",
+                        "message" => "Insufficient stock for '{$EQUIP_CHECK->item_name}'. Requested: $requestedQty, Available: $avail"
+                    ]);
+                    exit();
+                }
+            }
+        } else {
+            // Serialized item check
+            if (!EquipmentRentItem::isSubEquipmentAvailable($item['sub_equipment_id'])) {
+                $SUB_EQ = new SubEquipment($item['sub_equipment_id']);
+                echo json_encode([
+                    "status" => "error",
+                    "message" => "Sub equipment '{$SUB_EQ->code}' is already rented out"
+                ]);
+                exit();
+            }
+        }
+    }
+
+    // Create master rent record
+    $EQUIPMENT_RENT = new EquipmentRent(NULL);
+    $EQUIPMENT_RENT->bill_number = $bill_number;
+    $EQUIPMENT_RENT->customer_id = $_POST['customer_id'] ?? '';
+    $EQUIPMENT_RENT->rental_date = $_POST['rental_date'] ?? date('Y-m-d');
+    $EQUIPMENT_RENT->rental_start_date = $_POST['rental_start_date'] ?? $_POST['rental_date'] ?? date('Y-m-d');
+    // Received date is system-controlled; ignore manual input and set when all items returned
+    // Keep previously stored received_date if already set and all items remain returned
+    $existingReceivedDate = $EQUIPMENT_RENT->received_date;
+    $EQUIPMENT_RENT->status = 'rented';
+    $EQUIPMENT_RENT->remark = $_POST['remark'] ?? '';
+    $EQUIPMENT_RENT->is_branch_exchange = isset($_POST['is_branch_exchange']) ? (int)$_POST['is_branch_exchange'] : 0;
+    $EQUIPMENT_RENT->workplace_address = $_POST['workplace_address'] ?? null;
+    $EQUIPMENT_RENT->total_items = count($items);
+    $EQUIPMENT_RENT->transport_cost = $_POST['transport_cost'] ?? 0;
+    $EQUIPMENT_RENT->deposit_total = $_POST['custom_deposit'] ?? 0;
+    $EQUIPMENT_RENT->payment_type_id = !empty($_POST['payment_type_id']) ? (int) $_POST['payment_type_id'] : null;
+    $EQUIPMENT_RENT->cheque_number = $_POST['cheque_number'] ?? null;
+    $EQUIPMENT_RENT->cheque_date = !empty($_POST['cheque_date']) ? $_POST['cheque_date'] : null;
+    $EQUIPMENT_RENT->cheque_branch_id = !empty($_POST['cheque_branch_id']) ? (int) $_POST['cheque_branch_id'] : null;
+    $EQUIPMENT_RENT->transfer_branch_id = !empty($_POST['transfer_branch_id']) ? (int) $_POST['transfer_branch_id'] : null;
+    $EQUIPMENT_RENT->bank_account_number = $_POST['bank_account_number'] ?? null;
+    $EQUIPMENT_RENT->bank_reference = $_POST['bank_reference'] ?? null;
+    $EQUIPMENT_RENT->bank_slip = uploadBankSlip($_FILES['bank_slip_file'] ?? null);
+    $EQUIPMENT_RENT->created_by = isset($_SESSION['id']) ? $_SESSION['id'] : null;
+
+    $rent_id = $EQUIPMENT_RENT->create();
+
+    if ($rent_id) {
+        // Create rent items
+        foreach ($items as $item) {
+            // Deposit sent from UI as per-day value; multiply by qty to store total for the item
+            $itemDeposit = $item['deposit_one_day'] ?? ($item['deposit'] ?? 0);
+            $itemDepositTotal = ($item['quantity'] ?? 1) * $itemDeposit;
+            $RENT_ITEM = new EquipmentRentItem(NULL);
+            $RENT_ITEM->rent_id = $rent_id;
+            $RENT_ITEM->equipment_id = $item['equipment_id'];
+            $RENT_ITEM->sub_equipment_id = $item['sub_equipment_id'];
+            $RENT_ITEM->rental_date = $item['rental_date'] ?? $_POST['rental_start_date'] ?? $_POST['rental_date'];
+            $RENT_ITEM->quantity = $item['quantity'] ?? 1;
+            $RENT_ITEM->rent_type = $item['rent_type'] ?? 'day';
+            $RENT_ITEM->duration = $item['duration'] ?? 0;
+            $RENT_ITEM->amount = $item['amount'] ?? 0;
+            $RENT_ITEM->deposit_amount = $itemDepositTotal;
+            $RENT_ITEM->status = 'rented';
+            $RENT_ITEM->department_id = $item['department_id'] ?? null;
+            $RENT_ITEM->remark = $item['remark'] ?? '';
+            
+            // Explicitly set tracking quantities
+            $RENT_ITEM->bill_qty = $RENT_ITEM->quantity;
+            $RENT_ITEM->pending_qty = $RENT_ITEM->quantity;
+            
+            $RENT_ITEM->create();
+        }
+
+        // Update total items count
+        $EQUIPMENT_RENT->id = $rent_id;
+        $EQUIPMENT_RENT->updateTotalItems();
+
+        // Audit log
+        $AUDIT_LOG = new AuditLog(NULL);
+        $AUDIT_LOG->ref_id = $rent_id;
+        $AUDIT_LOG->ref_code = $_POST['code'];
+        $AUDIT_LOG->action = 'CREATE';
+        $AUDIT_LOG->description = 'CREATE EQUIPMENT BILL NO #' . $_POST['code'] . ' with ' . count($items) . ' items';
+        $AUDIT_LOG->user_id = isset($_SESSION['id']) ? $_SESSION['id'] : 0;
+        $AUDIT_LOG->created_at = date("Y-m-d H:i:s");
+        $AUDIT_LOG->create();
+
+        // Update document tracking ID if the used bill number is greater than current tracking
+        $DOC_TRACKING = new DocumentTracking(1);
+        if ((int) $DOC_TRACKING->equipment_rent_id < (int) $bill_number) {
+            $db->readQuery("UPDATE `document_tracking` SET `equipment_rent_id` = '" . (int) $bill_number . "', `updated_at` = NOW() WHERE `id` = 1");
+        }
+
+        // Auto-create first deposit payment record
+        $initialDeposit = floatval($_POST['custom_deposit'] ?? 0);
+        if ($initialDeposit > 0) {
+            $DP = new DepositPayment(NULL);
+            $DP->rent_id = $rent_id;
+            $DP->amount = $initialDeposit;
+            $DP->payment_date = $_POST['rental_date'] ?? date('Y-m-d');
+            $DP->remark = 'Initial deposit';
+            $DP->create();
+        }
+
+        // Save transport details
+        $transportDetails = json_decode($_POST['transport_details'] ?? '[]', true);
+        if (!empty($transportDetails)) {
+            foreach ($transportDetails as $td) {
+                $TD = new TransportDetail(NULL);
+                $TD->rent_id = $rent_id;
+                $TD->transport_date = $td['transport_date'];
+                $TD->employee_id = $td['employee_id'];
+                $TD->vehicle_id = $td['vehicle_id'];
+                $TD->start_location = $td['start_location'];
+                $TD->end_location = $td['end_location'];
+                $TD->deliver_amount = $td['deliver_amount'] ?? 0;
+                $TD->pickup_amount = $td['pickup_amount'] ?? 0;
+                $TD->payment_method = $td['payment_method'] ?? 'credit';
+                $TD->is_settled = ($td['payment_method'] ?? 'credit') === 'cash' ? 1 : 0;
+                $TD->settled_date = ($td['payment_method'] ?? 'credit') === 'cash' ? $td['transport_date'] : null;
+                $TD->remark = $td['remark'] ?? '';
+                $TD->create();
+            }
+        }
+
+        // Return next transport code
+        $TD_DUMMY = new TransportDetail(null);
+        $nextCode = $TD_DUMMY->formatId($TD_DUMMY->getNextId());
+
+        echo json_encode([
+            "status" => "success", 
+            "rent_id" => $rent_id, 
+            "bill_number" => $bill_number,
+            "next_code" => $nextCode
+        ]);
+    } else {
+        echo json_encode(["status" => "error", "message" => "Failed to create rent record"]);
+    }
+    exit();
+}
+
+// Update equipment rent
+if (isset($_POST['update'])) {
+
+    if (empty($_POST['payment_type_id'])) {
+        echo json_encode(["status" => "error", "message" => "Please select a payment method"]);
+        exit();
+    }
+
+    // Check if bill number already exists (excluding current record)
+    $db = Database::getInstance();
+    $codeCheck = "SELECT id FROM equipment_rent WHERE bill_number = '{$_POST['code']}' AND id != '{$_POST['rent_id']}'";
+    $existingRent = mysqli_fetch_assoc($db->readQuery($codeCheck));
+
+    if ($existingRent) {
+        echo json_encode(["status" => "duplicate", "message" => "Bill number already exists in the system"]);
+        exit();
+    }
+
+    $EQUIPMENT_RENT = new EquipmentRent($_POST['rent_id']);
+
+    // Parse items from JSON
+    $items = json_decode($_POST['items'] ?? '[]', true);
+
+    if (empty($items)) {
+        echo json_encode(["status" => "error", "message" => "Please add at least one equipment item"]);
+        exit();
+    }
+
+    // Amount Validation
+    $totalAmount = 0;
+    foreach ($items as $item) {
+        $totalAmount += (float)($item['amount'] ?? 0);
+    }
+    $isBranchExchange = isset($_POST['is_branch_exchange']) && $_POST['is_branch_exchange'] == 1;
+
+    if ($isBranchExchange && $totalAmount > 0) {
+        echo json_encode(["status" => "error", "message" => "Branch exchange must have zero bill amount"]);
+        exit();
+    }
+    if (!$isBranchExchange && $totalAmount <= 0) {
+        echo json_encode(["status" => "error", "message" => "Normal rentals must have a bill amount greater than zero"]);
+        exit();
+    }
+
+    // Get existing item IDs for this rent
+    $existingItems = $EQUIPMENT_RENT->getItems();
+    $existingItemIds = array_column($existingItems, 'id');
+    $newItemIds = array_filter(array_column($items, 'id'));
+
+    // Find items to delete (exist in DB but not in new list)
+    $itemsToDelete = array_diff($existingItemIds, $newItemIds);
+
+    // Delete removed items
+    foreach ($itemsToDelete as $itemId) {
+        $RENT_ITEM = new EquipmentRentItem($itemId);
+        $RENT_ITEM->delete();
+    }
+
+    // Validate and update/create items
+    foreach ($items as $item) {
+        // Deposit sent from UI as per-day value; multiply by qty to store total for the item
+        $itemDeposit = $item['deposit_one_day'] ?? ($item['deposit'] ?? 0);
+        $itemDepositTotal = ($item['quantity'] ?? 1) * $itemDeposit;
+        $subEquipmentId = $item['sub_equipment_id'];
+        $itemId = $item['id'] ?? null;
+
+        // Check availability (exclude current item if updating)
+        $shouldCheck = true;
+        $isReturning = ($item['status'] ?? 'rented') === 'returned';
+
+        if ($itemId) {
+            $existingItemForCheck = new EquipmentRentItem($itemId);
+            // If sub_equipment hasn't changed, and we are not changing status from returned to rented (which is rare here),
+            // then we don't need to check availability because we already hold it.
+            if ($existingItemForCheck->sub_equipment_id == $subEquipmentId && $existingItemForCheck->status !== 'returned') {
+                $shouldCheck = false;
+            }
+        }
+
+        if ($shouldCheck && !$isReturning) {
+            $EQUIP_CHECK = new Equipment($item['equipment_id']);
+            if ($EQUIP_CHECK->no_sub_items != 1) {
+                if (!EquipmentRentItem::isSubEquipmentAvailable($subEquipmentId, $itemId)) {
+                    $SUB_EQ = new SubEquipment($subEquipmentId);
+                    echo json_encode([
+                        "status" => "error",
+                        "message" => "Sub equipment '{$SUB_EQ->code}' is already rented out"
+                    ]);
+                    exit();
+                }
+            }
+        }
+
+        if ($itemId) {
+            // Update existing item
+            $RENT_ITEM = new EquipmentRentItem($itemId);
+            $RENT_ITEM->equipment_id = $item['equipment_id'];
+            $RENT_ITEM->sub_equipment_id = $subEquipmentId;
+            $RENT_ITEM->rental_date = $item['rental_date'] ?? $_POST['rental_start_date'] ?? $_POST['rental_date'];
+            $RENT_ITEM->quantity = $item['quantity'] ?? 1;
+            $RENT_ITEM->rent_type = $item['rent_type'] ?? 'day';
+            $RENT_ITEM->duration = $item['duration'] ?? 0;
+            $RENT_ITEM->amount = $item['amount'] ?? 0;
+            $RENT_ITEM->deposit_amount = $itemDepositTotal;
+            $status = $item['status'] ?? 'rented';
+            // Validate status to prevent empty or invalid values
+            if ($status !== 'returned' && $status !== 'rented') {
+                $status = 'rented';
+            }
+            $RENT_ITEM->status = $status;
+            $RENT_ITEM->department_id = $item['department_id'] ?? null;
+            $RENT_ITEM->remark = $item['remark'] ?? '';
+            
+            // Update tracking quantities
+            $RENT_ITEM->bill_qty = $item['bill_qty'] ?? $RENT_ITEM->quantity;
+            $RENT_ITEM->pending_qty = max(0, $RENT_ITEM->quantity - ($RENT_ITEM->total_returned_qty ?? 0));
+            
+            $RENT_ITEM->update();
+        } else {
+            // Create new item
+            $RENT_ITEM = new EquipmentRentItem(NULL);
+            $RENT_ITEM->rent_id = $_POST['rent_id'];
+            $RENT_ITEM->equipment_id = $item['equipment_id'];
+            $RENT_ITEM->sub_equipment_id = $subEquipmentId;
+            $RENT_ITEM->rental_date = $item['rental_date'] ?? $_POST['rental_start_date'] ?? $_POST['rental_date'];
+            $RENT_ITEM->quantity = $item['quantity'] ?? 1;
+            $RENT_ITEM->rent_type = $item['rent_type'] ?? 'day';
+            $RENT_ITEM->duration = $item['duration'] ?? 0;
+            $RENT_ITEM->amount = $item['amount'] ?? 0;
+            $RENT_ITEM->deposit_amount = $itemDepositTotal;
+            $RENT_ITEM->status = 'rented';
+            $RENT_ITEM->department_id = $item['department_id'] ?? null;
+            $RENT_ITEM->remark = $item['remark'] ?? '';
+            $RENT_ITEM->create();
+        }
+    }
+
+    // Update master record
+    $EQUIPMENT_RENT->bill_number = $_POST['code'];
+    $EQUIPMENT_RENT->customer_id = $_POST['customer_id'] ?? '';
+    $EQUIPMENT_RENT->rental_date = $_POST['rental_date'] ?? date('Y-m-d');
+    $EQUIPMENT_RENT->rental_start_date = $_POST['rental_start_date'] ?? $_POST['rental_date'] ?? date('Y-m-d');
+    $EQUIPMENT_RENT->remark = $_POST['remark'] ?? '';
+    $EQUIPMENT_RENT->is_branch_exchange = isset($_POST['is_branch_exchange']) ? (int)$_POST['is_branch_exchange'] : 0;
+    $EQUIPMENT_RENT->workplace_address = $_POST['workplace_address'] ?? null;
+    $EQUIPMENT_RENT->transport_cost = $_POST['transport_cost'] ?? 0;
+    $EQUIPMENT_RENT->deposit_total = $_POST['custom_deposit'] ?? 0;
+    $EQUIPMENT_RENT->payment_type_id = !empty($_POST['payment_type_id']) ? (int) $_POST['payment_type_id'] : null;
+    $EQUIPMENT_RENT->cheque_number = $_POST['cheque_number'] ?? null;
+    $EQUIPMENT_RENT->cheque_date = !empty($_POST['cheque_date']) ? $_POST['cheque_date'] : null;
+    $EQUIPMENT_RENT->cheque_branch_id = !empty($_POST['cheque_branch_id']) ? (int) $_POST['cheque_branch_id'] : null;
+    $EQUIPMENT_RENT->transfer_branch_id = !empty($_POST['transfer_branch_id']) ? (int) $_POST['transfer_branch_id'] : null;
+    $EQUIPMENT_RENT->bank_account_number = $_POST['bank_account_number'] ?? null;
+    $EQUIPMENT_RENT->bank_reference = $_POST['bank_reference'] ?? null;
+    $existingSlip = $_POST['bank_slip_existing'] ?? null;
+    $EQUIPMENT_RENT->bank_slip = uploadBankSlip($_FILES['bank_slip_file'] ?? null, $existingSlip);
+
+    // Check if all items are returned
+    $allReturned = true;
+    foreach ($items as $item) {
+        if (($item['status'] ?? 'rented') === 'rented') {
+            $allReturned = false;
+            break;
+        }
+    }
+    $EQUIPMENT_RENT->status = $allReturned ? 'returned' : 'rented';
+
+    if ($allReturned) {
+        // Set received date/time only once when all items are returned
+        $EQUIPMENT_RENT->received_date = $existingReceivedDate ?: date('Y-m-d H:i');
+    } else {
+        // Clear received date if items are still pending
+        $EQUIPMENT_RENT->received_date = null;
+    }
+
+    $res = $EQUIPMENT_RENT->update();
+    $EQUIPMENT_RENT->updateTotalItems();
+
+    // Sync transport details
+    $transportDetails = json_decode($_POST['transport_details'] ?? '[]', true);
+    
+    // Get existing transport details for this rent
+    $existingTDs = TransportDetail::getByRentId($_POST['rent_id']);
+    $existingTDIds = array_column((array)$existingTDs, 'id');
+    
+    // Keep track of IDs passed from frontend
+    $incomingTDIds = [];
+    
+    if (!empty($transportDetails)) {
+        foreach ($transportDetails as $td) {
+            if (!empty($td['id']) && is_numeric($td['id'])) {
+                // Update existing
+                $incomingTDIds[] = $td['id'];
+                $TD = new TransportDetail($td['id']);
+                $TD->transport_date = $td['transport_date'];
+                $TD->employee_id = $td['employee_id'];
+                $TD->vehicle_id = $td['vehicle_id'];
+                $TD->start_location = $td['start_location'];
+                $TD->end_location = $td['end_location'];
+                $TD->deliver_amount = $td['deliver_amount'] ?? 0;
+                $TD->pickup_amount = $td['pickup_amount'] ?? 0;
+                $TD->payment_method = $td['payment_method'] ?? 'credit';
+                if (!isset($td['is_settled'])) {
+                    $TD->is_settled = ($td['payment_method'] ?? 'credit') === 'cash' ? 1 : 0;
+                    $TD->settled_date = ($td['payment_method'] ?? 'credit') === 'cash' ? $td['transport_date'] : null;
+                } else {
+                    $TD->is_settled = (int)($td['is_settled'] ?? 0);
+                    $TD->settled_date = $td['settled_date'] ?? null;
+                    $TD->settlement_amount = $td['settlement_amount'] ?? 0;
+                    $TD->settlement_remark = $td['settlement_remark'] ?? null;
+                }
+                $TD->remark = $td['remark'] ?? '';
+                $TD->update();
+            } else {
+                // Create new
+                $TD = new TransportDetail(NULL);
+                $TD->rent_id = $_POST['rent_id'];
+                $TD->transport_date = $td['transport_date'];
+                $TD->employee_id = $td['employee_id'];
+                $TD->vehicle_id = $td['vehicle_id'];
+                $TD->start_location = $td['start_location'];
+                $TD->end_location = $td['end_location'];
+                $TD->deliver_amount = $td['deliver_amount'] ?? 0;
+                $TD->pickup_amount = $td['pickup_amount'] ?? 0;
+                $TD->payment_method = $td['payment_method'] ?? 'credit';
+                $TD->is_settled = ($td['payment_method'] ?? 'credit') === 'cash' ? 1 : 0;
+                $TD->settled_date = ($td['payment_method'] ?? 'credit') === 'cash' ? $td['transport_date'] : null;
+                $TD->remark = $td['remark'] ?? '';
+                $TD->create();
+            }
+        }
+    }
+    
+    // Delete any existing IDs not present in the incoming list
+    $tdsToDelete = array_diff($existingTDIds, $incomingTDIds);
+    foreach ($tdsToDelete as $tdId) {
+        $TD = new TransportDetail($tdId);
+        $TD->delete();
+    }
+
+    // Audit log
+    $AUDIT_LOG = new AuditLog(NULL);
+    $AUDIT_LOG->ref_id = $_POST['rent_id'];
+    $AUDIT_LOG->ref_code = $_POST['code'];
+    $AUDIT_LOG->action = 'UPDATE';
+    $AUDIT_LOG->description = 'UPDATE EQUIPMENT BILL NO #' . $_POST['code'];
+    $AUDIT_LOG->user_id = isset($_SESSION['id']) ? $_SESSION['id'] : 0;
+    $AUDIT_LOG->created_at = date("Y-m-d H:i:s");
+    $AUDIT_LOG->create();
+
+    if ($res) {
+        echo json_encode(["status" => "success"]);
+    } else {
+        echo json_encode(["status" => "error"]);
+    }
+    exit();
+}
+
+// Get rent details with items
+if (isset($_POST['action']) && $_POST['action'] === 'get_rent_details') {
+    $rent_id = $_POST['rent_id'] ?? 0;
+
+    if ($rent_id) {
+        $EQUIPMENT_RENT = new EquipmentRent($rent_id);
+
+        $paymentTypeName = null;
+        if (!empty($EQUIPMENT_RENT->payment_type_id)) {
+            $PAYMENT_TYPE = new PaymentType((int) $EQUIPMENT_RENT->payment_type_id);
+            $paymentTypeName = $PAYMENT_TYPE->name ?? null;
+        }
+
+        // Get items with equipment deposit info
+        $db = Database::getInstance();
+        $itemsQuery = "SELECT ri.*, 
+                       e.code as equipment_code, e.item_name as equipment_name, 
+                       e.deposit_one_day as equipment_deposit, e.no_sub_items, e.change_value, e.is_fixed_rate,
+                       se.code as sub_equipment_code,
+                       dm.name as department_name,
+                       -- latest return info per item
+                       (SELECT err.return_date FROM equipment_rent_returns err 
+                            WHERE err.rent_item_id = ri.id 
+                            ORDER BY err.return_date DESC, err.id DESC LIMIT 1) AS latest_return_date,
+                       (SELECT err.return_time FROM equipment_rent_returns err 
+                            WHERE err.rent_item_id = ri.id 
+                            ORDER BY err.return_date DESC, err.id DESC LIMIT 1) AS latest_return_time,
+                       (SELECT err.after_9am_extra_day FROM equipment_rent_returns err 
+                            WHERE err.rent_item_id = ri.id 
+                            ORDER BY err.return_date DESC, err.id DESC LIMIT 1) AS latest_after_9am_flag,
+                       (SELECT GREATEST(1, DATEDIFF(err.return_date, ri.rental_date))
+                            FROM equipment_rent_returns err 
+                            WHERE err.rent_item_id = ri.id 
+                            ORDER BY err.return_date DESC, err.id DESC LIMIT 1) AS latest_used_days,
+                       (SELECT COALESCE(SUM(err.return_qty), 0) FROM equipment_rent_returns err WHERE err.rent_item_id = ri.id) AS total_returned_qty,
+                       (ri.quantity - (SELECT COALESCE(SUM(err.return_qty), 0) FROM equipment_rent_returns err WHERE err.rent_item_id = ri.id)) AS pending_qty
+                       FROM equipment_rent_items ri 
+                       LEFT JOIN equipment e ON ri.equipment_id = e.id
+                       LEFT JOIN sub_equipment se ON ri.sub_equipment_id = se.id
+                       LEFT JOIN department_master dm ON ri.department_id = dm.id
+                       WHERE ri.rent_id = $rent_id";
+        $itemsResult = $db->readQuery($itemsQuery);
+        $items = [];
+        while ($row = mysqli_fetch_assoc($itemsResult)) {
+            $items[] = $row;
+        }
+
+        // Calculate refund balance from returns
+        // Refund Balance = Customer Deposit - Total Charges (rental + extra day + damage + penalty)
+        $customerDeposit = floatval($EQUIPMENT_RENT->deposit_total ?? 0);
+        
+        // Get total charges from all returns: rental amounts + extra day + damage + penalty
+        $chargesQuery = "SELECT COALESCE(SUM(
+                            CASE WHEN err.rental_override IS NOT NULL
+                                THEN err.rental_override
+                                ELSE CASE WHEN COALESCE(e.is_fixed_rate, 0) = 1
+                                    THEN ((COALESCE(eri.amount,0) / NULLIF(eri.quantity,0)) * err.return_qty)
+                                    WHEN eri.rent_type = 'month'
+                                    THEN ((COALESCE(eri.amount,0) / NULLIF(eri.quantity,0))
+                                        * GREATEST(DAY(LAST_DAY(eri.rental_date)), DATEDIFF(err.return_date, eri.rental_date))
+                                        * err.return_qty)
+                                ELSE (GREATEST(1, DATEDIFF(err.return_date, eri.rental_date))
+                                        * (COALESCE(eri.amount,0) / NULLIF(eri.quantity,0))
+                                        * err.return_qty)
+                                END
+                            END
+                            + COALESCE(err.extra_day_amount, 0)
+                            + COALESCE(err.damage_amount, 0)
+                            + COALESCE(err.penalty_amount, 0)
+                        ), 0) as total_charges
+                        FROM equipment_rent_returns err
+                        INNER JOIN equipment_rent_items eri ON err.rent_item_id = eri.id
+                        LEFT JOIN equipment e ON eri.equipment_id = e.id
+                        WHERE eri.rent_id = $rent_id";
+        $chargesResult = $db->readQuery($chargesQuery);
+        $chargesData = mysqli_fetch_assoc($chargesResult);
+        $totalCharges = floatval($chargesData['total_charges'] ?? 0);
+        $refundBalance = $customerDeposit - $totalCharges;
+
+        // Get total customer paid across all returns for this rent
+        $paidQuery = "SELECT COALESCE(SUM(err.customer_paid), 0) as total_customer_paid
+                      FROM equipment_rent_returns err
+                      INNER JOIN equipment_rent_items eri ON err.rent_item_id = eri.id
+                      WHERE eri.rent_id = $rent_id";
+        $paidResult = $db->readQuery($paidQuery);
+        $paidData = mysqli_fetch_assoc($paidResult);
+        $totalCustomerPaid = floatval($paidData['total_customer_paid'] ?? 0);
+
+        // Get total company outstanding (partial refund owed) across all returns for this rent
+        $companyOutQuery = "SELECT COALESCE(SUM(err.company_outstanding), 0) as total_company_outstanding,
+                                   COALESCE(SUM(err.company_refund_paid), 0) as total_company_refund_paid
+                            FROM equipment_rent_returns err
+                            INNER JOIN equipment_rent_items eri ON err.rent_item_id = eri.id
+                            WHERE eri.rent_id = $rent_id";
+        $companyOutResult = $db->readQuery($companyOutQuery);
+        $companyOutData = mysqli_fetch_assoc($companyOutResult);
+        $totalCompanyOutstanding = floatval($companyOutData['total_company_outstanding'] ?? 0);
+        $totalCompanyRefundPaid = floatval($companyOutData['total_company_refund_paid'] ?? 0);
+
+        // Calculate accrued charges for non-returned (pending) items based on today
+        $today = date('Y-m-d');
+        $accruedQuery = "SELECT COALESCE(SUM(
+            CASE WHEN COALESCE(e.is_fixed_rate, 0) = 1
+                THEN (COALESCE(ri.amount,0) / NULLIF(ri.quantity,0))
+                     * (ri.quantity - COALESCE(ri.total_returned_qty, 0))
+                WHEN ri.rent_type = 'month'
+                THEN (COALESCE(ri.amount,0) / NULLIF(ri.quantity,0))
+                     * GREATEST(DAY(LAST_DAY(ri.rental_date)), DATEDIFF('$today', ri.rental_date))
+                     * (ri.quantity - COALESCE(ri.total_returned_qty, 0))
+                ELSE (DATEDIFF('$today', ri.rental_date) + 1)
+                     * (COALESCE(ri.amount,0) / NULLIF(ri.quantity,0))
+                     * (ri.quantity - COALESCE(ri.total_returned_qty, 0))
+            END
+        ), 0) as accrued_charges
+        FROM equipment_rent_items ri
+        LEFT JOIN equipment e ON ri.equipment_id = e.id
+        WHERE ri.rent_id = $rent_id
+          AND (ri.quantity - COALESCE(ri.total_returned_qty, 0)) > 0";
+        $accruedResult = $db->readQuery($accruedQuery);
+        $accruedData = mysqli_fetch_assoc($accruedResult);
+        $accruedCharges = floatval($accruedData['accrued_charges'] ?? 0);
+
+        // Bill-level outstanding = (returned charges + accrued unreturned charges) - deposit
+        $billOutstanding = round(max(0, ($totalCharges + $accruedCharges) - $customerDeposit), 2);
+
+        // Collect distinct remarks saved with returns (most recent first)
+        $remarkQuery = "SELECT DISTINCT TRIM(err.remark) AS remark
+                        FROM equipment_rent_returns err
+                        INNER JOIN equipment_rent_items eri ON err.rent_item_id = eri.id
+                        WHERE eri.rent_id = $rent_id AND err.remark IS NOT NULL AND err.remark != ''
+                        ORDER BY err.id DESC";
+        $remarkResult = $db->readQuery($remarkQuery);
+        $returnRemarks = [];
+        if ($remarkResult) {
+            while ($remarkRow = mysqli_fetch_assoc($remarkResult)) {
+                if (!empty($remarkRow['remark'])) {
+                    $returnRemarks[] = $remarkRow['remark'];
+                }
+            }
+        }
+
+        // Get customer details
+        $CUSTOMER = new CustomerMaster($EQUIPMENT_RENT->customer_id);
+
+        // Resolve branch display names
+        $chequeBranchDisplay = null;
+        if (!empty($EQUIPMENT_RENT->cheque_branch_id)) {
+            $CB = new Branch($EQUIPMENT_RENT->cheque_branch_id);
+            if ($CB->id) {
+                $CBK = new Bank($CB->bank_id);
+                $chequeBranchDisplay = ($CBK->code ?? '') . ' - ' . ($CBK->name ?? '') . ' | ' . ($CB->code ?? '') . ' - ' . ($CB->name ?? '');
+            }
+        }
+        $transferBranchDisplay = null;
+        if (!empty($EQUIPMENT_RENT->transfer_branch_id)) {
+            $TB = new Branch($EQUIPMENT_RENT->transfer_branch_id);
+            if ($TB->id) {
+                $TBK = new Bank($TB->bank_id);
+                $transferBranchDisplay = ($TBK->code ?? '') . ' - ' . ($TBK->name ?? '') . ' | ' . ($TB->code ?? '') . ' - ' . ($TB->name ?? '');
+            }
+        }
+
+        echo json_encode([
+            "status" => "success",
+            "rent" => [
+                "id" => $EQUIPMENT_RENT->id,
+                "bill_number" => $EQUIPMENT_RENT->bill_number,
+                "customer_id" => $EQUIPMENT_RENT->customer_id,
+                "customer_name" => $CUSTOMER->code . ' - ' . $CUSTOMER->name,
+                "rental_date" => $EQUIPMENT_RENT->rental_date,
+                "rental_start_date" => $EQUIPMENT_RENT->rental_start_date,
+                "received_date" => $EQUIPMENT_RENT->received_date,
+                "status" => $EQUIPMENT_RENT->status,
+                "is_branch_exchange" => $EQUIPMENT_RENT->is_branch_exchange,
+                "remark" => $EQUIPMENT_RENT->remark,
+                "workplace_address" => $EQUIPMENT_RENT->workplace_address,
+                "transport_cost" => $EQUIPMENT_RENT->transport_cost,
+                "deposit_total" => $EQUIPMENT_RENT->deposit_total,
+                "refund_balance" => $refundBalance,
+                "payment_type_id" => $EQUIPMENT_RENT->payment_type_id,
+                "payment_type_name" => $paymentTypeName,
+                "cheque_number" => $EQUIPMENT_RENT->cheque_number,
+                "cheque_date" => $EQUIPMENT_RENT->cheque_date,
+                "cheque_branch_id" => $EQUIPMENT_RENT->cheque_branch_id,
+                "cheque_branch_display" => $chequeBranchDisplay,
+                "transfer_branch_id" => $EQUIPMENT_RENT->transfer_branch_id,
+                "transfer_branch_display" => $transferBranchDisplay,
+                "bank_account_number" => $EQUIPMENT_RENT->bank_account_number,
+                "bank_reference" => $EQUIPMENT_RENT->bank_reference,
+                "bank_slip" => $EQUIPMENT_RENT->bank_slip,
+                "total_items" => $EQUIPMENT_RENT->total_items,
+                "total_customer_paid" => $totalCustomerPaid,
+                "rent_outstanding" => floatval($CUSTOMER->rent_outstanding ?? 0),
+                "total_company_refund_paid" => $totalCompanyRefundPaid,
+                "total_company_outstanding" => $totalCompanyOutstanding,
+                "bill_outstanding" => $billOutstanding
+            ],
+            "items" => $items,
+            "return_remarks" => $returnRemarks,
+            "deposit_payments" => DepositPayment::getByRentId($rent_id),
+            "transport_details" => TransportDetail::getByRentId($rent_id),
+            "transport_total" => TransportDetail::getTotalByRentId($rent_id),
+            "trip_total_cost" => TripManagement::getTotalCostByBillId($rent_id)
+        ]);
+    } else {
+        echo json_encode(["status" => "error", "message" => "Rent ID required"]);
+    }
+    exit;
+}
+
+// Get new code
+if (isset($_POST['action']) && $_POST['action'] === 'get_new_code') {
+    // Get bill number from document tracking table
+    $DOCUMENT_TRACKING = new DocumentTracking(1);
+    $lastId = $DOCUMENT_TRACKING->equipment_rent_id;
+    $newCode = $lastId + 1;
+
+    echo json_encode([
+        "status" => "success",
+        "code" => $newCode
+    ]);
+    exit;
+}
+
+// Save first print date/time of the rent invoice
+if (isset($_POST['action']) && $_POST['action'] === 'mark_printed') {
+    $rentId = (int) ($_POST['rent_id'] ?? 0);
+    $printedAt = $_POST['printed_at'] ?? '';
+    $dt = DateTime::createFromFormat('Y-m-d H:i:s', $printedAt);
+    if (!$rentId || !$dt || $dt->format('Y-m-d H:i:s') !== $printedAt) {
+        echo json_encode(["status" => "error", "message" => "Invalid data"]);
+        exit;
+    }
+
+    $EQUIPMENT_RENT = new EquipmentRent($rentId);
+    if (!$EQUIPMENT_RENT->id) {
+        echo json_encode(["status" => "error", "message" => "Rent record not found"]);
+        exit;
+    }
+
+    $EQUIPMENT_RENT->markPrinted($printedAt, ($_POST['invoice_type'] ?? '') === 'return');
+    echo json_encode(["status" => "success"]);
+    exit;
+}
+
+// Get next transport ID
+if (isset($_POST['action']) && $_POST['action'] === 'get_next_transport_id') {
+    $TD = new TransportDetail(null);
+    $next = $TD->getNextId();
+    echo json_encode([
+        "status" => "success",
+        "next_code" => $TD->formatId($next)
+    ]);
+    exit;
+}
+
+// Get transport details for a rent
+if (isset($_POST['action']) && $_POST['action'] === 'get_transport_details') {
+    $rent_id = $_POST['rent_id'] ?? 0;
+    if ($rent_id) {
+        echo json_encode([
+            "status" => "success",
+            "transport_details" => TransportDetail::getByRentId($rent_id),
+            "transport_total" => TransportDetail::getTotalByRentId($rent_id),
+            "trip_total_cost" => TripManagement::getTotalCostByBillId($rent_id)
+        ]);
+    } else {
+        echo json_encode(["status" => "error", "message" => "Rent ID required"]);
+    }
+    exit;
+}
+
+// Get data for transport dropdowns
+if (isset($_POST['action']) && $_POST['action'] === 'get_transport_dropdown_data') {
+    $db = Database::getInstance();
+    $employees = [];
+    $vehicles = [];
+
+    $employeeResult = $db->readQuery("SELECT `id`, `name`, `code` FROM `employee_master`");
+    if ($employeeResult) {
+        while ($row = mysqli_fetch_assoc($employeeResult)) {
+            $employees[] = $row;
+        }
+    }
+
+    $vehicleResult = $db->readQuery("SELECT `id`, `vehicle_no` FROM `vehicles`");
+    if ($vehicleResult) {
+        while ($row = mysqli_fetch_assoc($vehicleResult)) {
+            $vehicles[] = $row;
+        }
+    }
+
+    echo json_encode([
+        "status" => "success",
+        "employees" => $employees,
+        "vehicles" => $vehicles
+    ]);
+    exit;
+}
+
+// List bill numbers for autocomplete
+if (isset($_POST['action']) && $_POST['action'] === 'list_bill_numbers') {
+    $db = Database::getInstance();
+    $sql = "SELECT er.id, er.bill_number, c.name AS customer_name FROM equipment_rent er LEFT JOIN customer_master c ON er.customer_id = c.id ORDER BY er.id DESC";
+    $result = $db->readQuery($sql);
+    $data = [];
+
+    while ($row = mysqli_fetch_assoc($result)) {
+        $labelName = trim(($row['customer_name'] ?? ''));
+        $data[] = [
+            'label' => $row['bill_number'] . ($labelName ? (' - ' . $labelName) : ''),
+            'value' => $row['bill_number'],
+            'bill_number' => $row['bill_number'],
+            'rent_id' => $row['id'],
+        ];
+    }
+
+    echo json_encode([
+        'status' => 'success',
+        'data' => $data
+    ]);
+    exit;
+}
+
+// Get customer document images (photo + NIC front/back)
+if (isset($_POST['action']) && $_POST['action'] === 'get_customer_docs') {
+    $customer_id = isset($_POST['customer_id']) ? (int) $_POST['customer_id'] : 0;
+
+    if (!$customer_id) {
+        echo json_encode(['status' => 'error', 'message' => 'Customer ID required']);
+        exit;
+    }
+
+    $db = Database::getInstance();
+    $sql = "SELECT customer_photo, nic_image_1, nic_image_2 FROM customer_master WHERE id = $customer_id LIMIT 1";
+    $result = mysqli_fetch_assoc($db->readQuery($sql));
+
+    if ($result) {
+        echo json_encode([
+            'status' => 'success',
+            'data' => [
+                'customer_photo' => $result['customer_photo'] ?? '',
+                'nic_image_1' => $result['nic_image_1'] ?? '',
+                'nic_image_2' => $result['nic_image_2'] ?? '',
+            ]
+        ]);
+    } else {
+        echo json_encode(['status' => 'error', 'message' => 'Customer not found']);
+    }
+    exit;
+}
+
+// Get rent id by bill number
+if (isset($_POST['action']) && $_POST['action'] === 'get_rent_by_bill' && isset($_POST['bill_number'])) {
+    $db = Database::getInstance();
+    $bill = mysqli_real_escape_string($db->DB_CON, $_POST['bill_number']);
+    $sql = "SELECT id FROM equipment_rent WHERE bill_number = '$bill' LIMIT 1";
+    $result = $db->readQuery($sql);
+    $row = mysqli_fetch_assoc($result);
+
+    if ($row) {
+        echo json_encode([
+            'status' => 'success',
+            'rent_id' => $row['id']
+        ]);
+    } else {
+        echo json_encode([
+            'status' => 'error',
+            'message' => 'Bill number not found'
+        ]);
+    }
+    exit;
+}
+
+// Get available sub-equipment for an equipment
+if (isset($_POST['action']) && $_POST['action'] === 'get_available_sub_equipment') {
+    $equipment_id = $_POST['equipment_id'] ?? 0;
+
+    if ($equipment_id) {
+        $department_id = $_POST['department_id'] ?? null;
+        $available = EquipmentRentItem::getAvailableSubEquipment($equipment_id, $department_id);
+        echo json_encode([
+            "status" => "success",
+            "sub_equipment" => $available
+        ]);
+    } else {
+        echo json_encode([
+            "status" => "error",
+            "message" => "Equipment ID required"
+        ]);
+    }
+    exit;
+}
+
+// Get all sub-equipment with status for an equipment
+if (isset($_POST['action']) && $_POST['action'] === 'get_all_sub_equipment') {
+    $equipment_id = $_POST['equipment_id'] ?? 0;
+
+    if ($equipment_id) {
+        $all = EquipmentRentItem::getAllSubEquipmentWithStatus($equipment_id);
+        echo json_encode([
+            "status" => "success",
+            "sub_equipment" => $all
+        ]);
+    } else {
+        echo json_encode([
+            "status" => "error",
+            "message" => "Equipment ID required"
+        ]);
+    }
+    exit;
+}
+
+// Get equipment info with sub-equipment count
+if (isset($_POST['action']) && $_POST['action'] === 'get_equipment_info') {
+    $equipment_id = $_POST['equipment_id'] ?? 0;
+
+    if ($equipment_id) {
+        $department_id = $_POST['department_id'] ?? null;
+        $EQUIPMENT = new Equipment($equipment_id);
+        $available = EquipmentRentItem::getAvailableSubEquipment($equipment_id, $department_id);
+        $all = EquipmentRentItem::getAllSubEquipmentWithStatus($equipment_id);
+
+        // For bulk items, if department is selected, we need to know the specific stock for that department
+        // and how much of IT is available (Total Stock in Dept - Rented Linked to Dept??)
+        // Currently we don't link rent items to department for bulk items (sub_equipment_id might be used if we start linking)
+        // But for display "Department Wise Qty", we can at least show the Total Stock of that department.
+        
+        $departmentStockQty = 0;
+        if ($department_id && $EQUIPMENT->no_sub_items == 1) {
+            // Get stock for this department
+            $stockQuery = "SELECT qty FROM sub_equipment WHERE equipment_id = $equipment_id AND department_id = $department_id";
+            $db = Database::getInstance();
+            $stockResult = mysqli_fetch_assoc($db->readQuery($stockQuery));
+            $departmentStockQty = $stockResult['qty'] ?? 0;
+            
+            // For now, we don't have per-department rented tracking for bulk items.
+            // So 'available' for that department is just its total stock (minus global rented? No, that would be confusing).
+            // Or we just return the Total Department Stock as valid.
+        }
+
+        echo json_encode([
+            "status" => "success",
+            "equipment" => [
+                "id" => $EQUIPMENT->id,
+                "code" => $EQUIPMENT->code,
+                "item_name" => $EQUIPMENT->item_name,
+                "rent_one_day" => $EQUIPMENT->rent_one_day,
+                "rent_one_month" => $EQUIPMENT->rent_one_month,
+                "deposit_one_day" => $EQUIPMENT->deposit_one_day,
+                "no_sub_items" => $EQUIPMENT->no_sub_items,
+                "is_fixed_rate" => $EQUIPMENT->is_fixed_rate,
+                "quantity" => $EQUIPMENT->quantity
+            ],
+            "total_sub_equipment" => count($all),
+            "available_count" => ($department_id && $EQUIPMENT->no_sub_items == 1) ? $departmentStockQty : count($available),
+            "department_stock_qty" => $departmentStockQty
+        ]);
+    } else {
+        echo json_encode([
+            "status" => "error",
+            "message" => "Equipment ID required"
+        ]);
+    }
+    exit;
+}
+
+// Delete equipment rent
+if (isset($_POST['delete'])) {
+    $rent_id = $_POST['id'] ?? 0;
+    
+    if ($rent_id) {
+        $EQUIPMENT_RENT = new EquipmentRent($rent_id);
+        $bill_number = $EQUIPMENT_RENT->bill_number;
+        
+        if ($EQUIPMENT_RENT->delete()) {
+            $AUDIT_LOG = new AuditLog(NULL);
+            $AUDIT_LOG->ref_id = $rent_id;
+            $AUDIT_LOG->ref_code = $bill_number;
+            $AUDIT_LOG->action = 'DELETE';
+            $AUDIT_LOG->description = 'DELETE EQUIPMENT BILL NO #' . $bill_number;
+            $AUDIT_LOG->user_id = isset($_SESSION['id']) ? $_SESSION['id'] : 0;
+            $AUDIT_LOG->created_at = date("Y-m-d H:i:s");
+            $AUDIT_LOG->create();
+            
+            echo json_encode(["status" => "success", "message" => "Equipment rent deleted successfully"]);
+        } else {
+            echo json_encode(["status" => "error", "message" => "Failed to delete equipment rent"]);
+        }
+    } else {
+        echo json_encode(["status" => "error", "message" => "Rent ID required"]);
+    }
+    exit;
+}
+
+// Return all items
+if (isset($_POST['action']) && $_POST['action'] === 'return_all') {
+    $rent_id = $_POST['rent_id'] ?? 0;
+    $previewOnly = isset($_POST['preview_only']) && intval($_POST['preview_only']) === 1;
+    $rentalOverride = isset($_POST['rental_override']) && $_POST['rental_override'] !== ''
+        ? floatval($_POST['rental_override'])
+        : null;
+    $extraChargeTotal = isset($_POST['extra_charge_amount']) && $_POST['extra_charge_amount'] !== ''
+        ? max(0, floatval($_POST['extra_charge_amount']))
+        : 0;
+    $repairCost = isset($_POST['repair_cost']) && $_POST['repair_cost'] !== ''
+        ? max(0, floatval($_POST['repair_cost']))
+        : 0;
+    $damageAmountTotal = isset($_POST['damage_amount']) && $_POST['damage_amount'] !== ''
+        ? max(0, floatval($_POST['damage_amount']))
+        : 0;
+    $returnRemark = isset($_POST['return_remark'])
+        ? trim($_POST['return_remark'])
+        : '';
+    
+    if ($rent_id) {
+        $EQUIPMENT_RENT = new EquipmentRent($rent_id);
+        $items = $EQUIPMENT_RENT->getItems();
+
+        if (!$items) {
+            echo json_encode(["status" => "error", "message" => "No items found for this rent"]);
+            exit;
+        }
+
+        // Prefer client-provided date/time (local to user); fallback to server time
+        $nowDate = !empty($_POST['return_date']) ? $_POST['return_date'] : date('Y-m-d');
+        $nowTime = !empty($_POST['return_time']) ? $_POST['return_time'] : date('H:i');
+        $after9Flag = isset($_POST['after_9am_extra_day']) ? (int) $_POST['after_9am_extra_day'] : 0;
+        // If user wants to count an extra day for all items, ensure return time is after 9:00 AM
+        if ($after9Flag === 1 && $nowTime < '09:00') {
+            $nowTime = '09:01';
+        }
+
+        $totals = [
+            'rental_amount' => 0,
+            'extra_day_amount' => 0,
+            'damage_amount' => 0,
+            'penalty_amount' => 0,
+            'extra_charge_amount' => 0,
+            'repair_cost' => 0,
+            'settle_amount' => 0,
+            'refund_amount' => 0,
+            'additional_payment' => 0,
+            // Customer deposit info
+            'deposit_total' => 0,
+            'remaining_deposit' => 0,
+        ];
+
+        // Collect per-item calculations first (without deposit applied per-item)
+        // so we can apply the customer deposit ONCE across all items
+        $itemCalculations = [];
+        $customerDeposit = 0;
+        $totalPreviousCharges = 0;
+
+        // First pass: count total pending items to distribute damage
+        $totalPendingQty = 0;
+        foreach ($items as $item) {
+            $pendingQty = max(0, ($item['quantity'] ?? 0) - EquipmentRentReturn::getTotalReturnedQty($item['id']));
+            $totalPendingQty += $pendingQty;
+        }
+        
+        foreach ($items as $item) {
+            // Only process items that still have pending quantity
+            $pendingQty = max(0, ($item['quantity'] ?? 0) - EquipmentRentReturn::getTotalReturnedQty($item['id']));
+            if ($pendingQty <= 0) {
+                continue;
+            }
+
+            // Distribute damage amount proportionally based on quantity
+            $itemDamageShare = $totalPendingQty > 0 ? ($pendingQty / $totalPendingQty) * $damageAmountTotal : 0;
+
+            // Calculate settlement for full pending quantity with damage
+            $calculation = EquipmentRentReturn::calculateSettlement($item['id'], $pendingQty, $itemDamageShare, $nowDate, $nowTime, $after9Flag, 0, 0);
+
+            // If after-9 flag is set but extra day amount did not compute, force one extra-day charge
+            // Skip override for fixed-rate items (flat charge only)
+            $isFixedRate = isset($calculation['is_fixed_rate']) && intval($calculation['is_fixed_rate']) === 1;
+            if (!$isFixedRate && $after9Flag === 1 && floatval($calculation['extra_day_amount'] ?? 0) <= 0) {
+                $extraOverride = floatval($calculation['per_unit_daily'] ?? 0) * $pendingQty;
+                $calculation = EquipmentRentReturn::calculateSettlement($item['id'], $pendingQty, $itemDamageShare, $nowDate, $nowTime, $after9Flag, $extraOverride, 0);
+            }
+
+            if ($calculation['error']) {
+                echo json_encode(["status" => "error", "message" => $calculation['message']]);
+                exit;
+            }
+
+            // Capture customer deposit info from the first item (same for all items in this rent)
+            if (empty($itemCalculations)) {
+                $customerDeposit = floatval($calculation['customer_deposit_original'] ?? 0);
+                $totalPreviousCharges = floatval($calculation['total_previous_charges'] ?? 0);
+            }
+
+            $itemCalculations[] = [
+                'item' => $item,
+                'pendingQty' => $pendingQty,
+                'calculation' => $calculation,
+            ];
+        }
+
+        // Calculate the remaining customer deposit (applied ONCE, not per-item)
+        $remainingDeposit = max(0, $customerDeposit - $totalPreviousCharges);
+        $totals['deposit_total'] = $customerDeposit;
+        $totals['remaining_deposit'] = $remainingDeposit;
+
+        // Sum up raw charges across all items (rental + extra + damage + penalty)
+        $totalRawCharges = 0;
+        $totalOriginalRental = 0;
+        foreach ($itemCalculations as &$entry) {
+            $calc = $entry['calculation'];
+            $itemRental = floatval($calc['rental_amount'] ?? 0);
+            $rawCharge = round(
+                $itemRental
+                + floatval($calc['extra_day_amount'] ?? 0)
+                + floatval($calc['damage_amount'] ?? 0)
+                + floatval($calc['penalty_amount'] ?? 0),
+                2
+            );
+            $entry['raw_charge'] = $rawCharge;
+            $entry['original_rental'] = round($itemRental, 2);
+            $totalRawCharges += $rawCharge;
+            $totalOriginalRental += $entry['original_rental'];
+
+            // Accumulate component totals
+            $totals['rental_amount'] += $itemRental;
+            $totals['extra_day_amount'] += floatval($calc['extra_day_amount'] ?? 0);
+            $totals['damage_amount'] += floatval($calc['damage_amount'] ?? 0);
+            $totals['penalty_amount'] += floatval($calc['penalty_amount'] ?? 0);
+        }
+        unset($entry);
+
+        // Apply manual rental override BEFORE creating records so it gets saved to DB
+        $rentalOverridePerItem = []; // keyed by item id
+        if ($rentalOverride !== null && $rentalOverride >= 0) {
+            $rentalDiff = $rentalOverride - $totals['rental_amount'];
+            $totals['rental_amount'] = $rentalOverride;
+
+            // Redistribute the override proportionally across items based on their original rental share
+            foreach ($itemCalculations as &$entry) {
+                $itemId = $entry['item']['id'];
+                if ($totalOriginalRental > 0) {
+                    $share = $entry['original_rental'] / $totalOriginalRental;
+                    $rentalOverridePerItem[$itemId] = round($rentalOverride * $share, 2);
+                } else {
+                    // Equal distribution if all originals are zero
+                    $rentalOverridePerItem[$itemId] = round($rentalOverride / max(1, count($itemCalculations)), 2);
+                }
+                // Recalculate this item's raw charge with the overridden rental
+                $entry['raw_charge'] = round(
+                    $rentalOverridePerItem[$itemId]
+                    + floatval($entry['calculation']['extra_day_amount'] ?? 0)
+                    + floatval($entry['calculation']['damage_amount'] ?? 0)
+                    + floatval($entry['calculation']['penalty_amount'] ?? 0),
+                    2
+                );
+            }
+            unset($entry);
+
+            // Recalculate total raw charges with override
+            $totalRawCharges = 0;
+            foreach ($itemCalculations as $entry) {
+                $totalRawCharges += $entry['raw_charge'];
+            }
+        }
+
+        // Allocate extra charge proportionally to each item's raw charge
+        $totals['extra_charge_amount'] = round($extraChargeTotal, 2);
+        $totals['repair_cost'] = round($repairCost, 2);
+        $totalRawChargesWithExtra = round($totalRawCharges + $extraChargeTotal, 2);
+        $totals['total_rent_amount'] = $totalRawChargesWithExtra;
+        foreach ($itemCalculations as &$entry) {
+            $itemShare = $totalRawCharges > 0
+                ? ($entry['raw_charge'] / $totalRawCharges) * $extraChargeTotal
+                : 0;
+            $entry['extra_charge_share'] = $itemShare;
+            $entry['raw_charge_with_extra'] = round($entry['raw_charge'] + $itemShare, 2);
+        }
+        unset($entry);
+
+        // Apply customer deposit ONCE to get correct net settlement
+        // Repair cost is a deduction (company pays customer), so subtract it
+        $totals['settle_amount'] = round(($totalRawChargesWithExtra - $totals['repair_cost']) - $remainingDeposit, 2);
+        if ($totals['settle_amount'] < 0) {
+            $totals['refund_amount'] = round(abs($totals['settle_amount']), 2);
+            $totals['additional_payment'] = 0;
+        } else {
+            $totals['refund_amount'] = 0;
+            $totals['additional_payment'] = round($totals['settle_amount'], 2);
+        }
+
+        // If preview only, just return the totals
+        if ($previewOnly) {
+            echo json_encode(["status" => "success", "preview" => true, "calculation" => $totals]);
+            exit;
+        }
+
+        // Now create return records with override-adjusted amounts
+        // Handle customer_paid for the whole return-all
+        $totalCustomerPaid = isset($_POST['customer_paid']) ? floatval($_POST['customer_paid']) : 0;
+        $totalAdditionalPayment = $totals['additional_payment'];
+
+        // Persist header total rent amount
+        $EQUIPMENT_RENT->total_rent_amount = $totals['total_rent_amount'];
+
+        // Handle company_refund_paid for partial refund scenarios
+        $totalCompanyRefundPaid = isset($_POST['company_refund_paid']) ? floatval($_POST['company_refund_paid']) : 0;
+        $totalRefundAmount = $totals['refund_amount'];
+        $isPartialRefund = isset($_POST['partial_refund']) ? intval($_POST['partial_refund']) === 1 : false;
+        if ($totalRefundAmount > 0) {
+            if ($isPartialRefund) {
+                // Allow zero/empty to mean nothing paid yet; clamp within range
+                $totalCompanyRefundPaid = max(0, min($totalRefundAmount, $totalCompanyRefundPaid));
+            } else {
+                // When not partial, default to full refund if nothing specified
+                if ($totalCompanyRefundPaid <= 0) {
+                    $totalCompanyRefundPaid = $totalRefundAmount;
+                } else {
+                    $totalCompanyRefundPaid = min($totalRefundAmount, $totalCompanyRefundPaid);
+                }
+            }
+        }
+
+        foreach ($itemCalculations as $entry) {
+            $item = $entry['item'];
+            $pendingQty = $entry['pendingQty'];
+            $calculation = $entry['calculation'];
+            $rawCharge = round($entry['raw_charge_with_extra'] ?? ($entry['raw_charge'] + ($entry['extra_charge_share'] ?? 0)), 2);
+            $itemTotalRent = $rawCharge;
+
+            // Distribute repair cost proportionally based on raw charge
+            $repairShare = ($totalRawChargesWithExtra > 0)
+                ? ($rawCharge / $totalRawChargesWithExtra) * $repairCost
+                : ($repairCost > 0 ? $repairCost / count($itemCalculations) : 0);
+
+            // Distribute the deposit proportionally across items based on their raw charge
+            $itemDepositShare = ($totalRawChargesWithExtra > 0)
+                ? ($rawCharge / $totalRawChargesWithExtra) * $remainingDeposit
+                : 0;
+            
+            // Repair cost is a deduction, so subtract it from the customer's charge
+            $itemSettle = ($rawCharge - $repairShare) - $itemDepositShare;
+            $itemRefund = $itemSettle < 0 ? abs($itemSettle) : 0;
+            $itemAdditional = $itemSettle > 0 ? $itemSettle : 0;
+
+            // Create return record for the item
+            $RETURN = new EquipmentRentReturn(NULL);
+            $RETURN->rent_item_id = $item['id'];
+            $RETURN->return_date = $nowDate;
+            $RETURN->return_time = $nowTime;
+            $RETURN->return_qty = $pendingQty;
+            $RETURN->damage_amount = floatval($calculation['damage_amount'] ?? 0);
+            $RETURN->after_9am_extra_day = $after9Flag;
+            $RETURN->extra_day_amount = floatval($calculation['extra_day_amount'] ?? 0);
+            $RETURN->penalty_percentage = floatval($calculation['penalty_percentage'] ?? 0);
+            $RETURN->penalty_amount = floatval($calculation['penalty_amount'] ?? 0);
+            $RETURN->extra_charge_amount = round($entry['extra_charge_share'] ?? 0, 2);
+            $RETURN->repair_cost = round($repairShare, 2);
+            // Store the rental override for this item (null if no override was used)
+            $RETURN->rental_override = isset($rentalOverridePerItem[$item['id']]) 
+                ? $rentalOverridePerItem[$item['id']] 
+                : null;
+            $RETURN->settle_amount = round($itemSettle, 2);
+            $RETURN->refund_amount = round($itemRefund, 2);
+            $RETURN->additional_payment = round($itemAdditional, 2);
+            // Distribute customer_paid proportionally across items
+            if ($totalAdditionalPayment > 0 && $itemAdditional > 0) {
+                $paidShare = ($itemAdditional / $totalAdditionalPayment) * $totalCustomerPaid;
+                $RETURN->customer_paid = round($paidShare, 2);
+                $RETURN->initial_customer_paid = round($paidShare, 2);
+                $RETURN->outstanding_amount = round(max(0, $itemAdditional - $paidShare), 2);
+            } else {
+                $RETURN->customer_paid = 0;
+                $RETURN->initial_customer_paid = 0;
+                $RETURN->outstanding_amount = 0;
+            }
+            // Distribute company refund paid proportionally across items
+            if ($totalRefundAmount > 0 && $itemRefund > 0) {
+                $refundPaidShare = ($itemRefund / $totalRefundAmount) * $totalCompanyRefundPaid;
+                $RETURN->company_refund_paid = round($refundPaidShare, 2);
+                $RETURN->initial_company_refund_paid = round($refundPaidShare, 2);
+                $RETURN->company_outstanding = round(max(0, $itemRefund - $refundPaidShare), 2);
+            } else {
+                $RETURN->company_refund_paid = 0;
+                $RETURN->initial_company_refund_paid = 0;
+                $RETURN->company_outstanding = 0;
+            }
+            $RETURN->remark = !empty($returnRemark)
+                ? $returnRemark
+                : 'Returned via Return All';
+
+            $return_id = $RETURN->create();
+
+            if ($return_id) {
+                // Update item total rent amount
+                $ITEM_MODEL = new EquipmentRentItem($item['id']);
+                $ITEM_MODEL->total_rent_amount = $itemTotalRent;
+                $ITEM_MODEL->update();
+                // Mark item as returned
+                $RENT_ITEM = new EquipmentRentItem($item['id']);
+                $RENT_ITEM->markAsReturned();
+            } else {
+                echo json_encode(["status" => "error", "message" => "Failed to create return record for item #" . ($item['id'] ?? '')]);
+                exit;
+            }
+        }
+
+        // Update master rent status
+        $EQUIPMENT_RENT->status = 'returned';
+        // Store the return date/time from the modal as received_date
+        $EQUIPMENT_RENT->received_date = $nowDate . ' ' . $nowTime;
+        $EQUIPMENT_RENT->update();
+
+        // Audit log
+        $AUDIT_LOG = new AuditLog(NULL);
+        $AUDIT_LOG->ref_id = $rent_id;
+        $AUDIT_LOG->ref_code = $EQUIPMENT_RENT->bill_number;
+        $AUDIT_LOG->action = 'RETURN_ALL';
+        $AUDIT_LOG->description = 'RETURN ALL ITEMS FOR EQUIPMENT BILL NO #' . $EQUIPMENT_RENT->bill_number;
+        $AUDIT_LOG->user_id = isset($_SESSION['id']) ? $_SESSION['id'] : 0;
+        $AUDIT_LOG->created_at = date("Y-m-d H:i:s");
+        $AUDIT_LOG->create();
+        
+        echo json_encode(["status" => "success", "message" => "All items returned successfully", "calculation" => $totals]);
+    } else {
+        echo json_encode(["status" => "error", "message" => "Rent ID required"]);
+    }
+    exit;
+}
+
+// Cancel return - reverse all returns for a rent bill
+if (isset($_POST['action']) && $_POST['action'] === 'cancel_return') {
+    $rent_id = $_POST['rent_id'] ?? 0;
+
+    if (!$rent_id) {
+        echo json_encode(["status" => "error", "message" => "Rent ID required"]);
+        exit;
+    }
+
+    $db = Database::getInstance();
+    $EQUIPMENT_RENT = new EquipmentRent($rent_id);
+
+    if (!$EQUIPMENT_RENT->id) {
+        echo json_encode(["status" => "error", "message" => "Rent record not found"]);
+        exit;
+    }
+
+    // Get all items for this rent
+    $items = $EQUIPMENT_RENT->getItems();
+
+    if (!$items) {
+        echo json_encode(["status" => "error", "message" => "No items found for this rent"]);
+        exit;
+    }
+
+    // Delete all return records and reset each item
+    foreach ($items as $item) {
+        $itemId = (int) $item['id'];
+
+        // Delete all return records for this item
+        $deleteReturnsQuery = "DELETE FROM `equipment_rent_returns` WHERE `rent_item_id` = $itemId";
+        $db->readQuery($deleteReturnsQuery);
+
+        // Reset item status to rented and clear returned qty
+        $resetItemQuery = "UPDATE `equipment_rent_items` SET 
+            `status` = 'rented', 
+            `total_returned_qty` = 0, 
+            `pending_qty` = `quantity` 
+            WHERE `id` = $itemId";
+        $db->readQuery($resetItemQuery);
+
+        // Set sub-equipment back to rented status
+        if (!empty($item['sub_equipment_id'])) {
+            $subEqId = (int) $item['sub_equipment_id'];
+            $updateSubEqQuery = "UPDATE `sub_equipment` SET `rental_status` = 'rent' WHERE `id` = $subEqId";
+            $db->readQuery($updateSubEqQuery);
+        } elseif (!empty($item['department_id'])) {
+            // Bulk item - restore rented stock (add back what was returned)
+            $returnedQty = (int)($item['total_returned_qty'] ?? 0);
+            if ($returnedQty > 0) {
+                $eId = (int)$item['equipment_id'];
+                $dId = (int)$item['department_id'];
+                $restoreQuery = "UPDATE `sub_equipment` SET `rented_qty` = `rented_qty` + $returnedQty 
+                                 WHERE `equipment_id` = $eId AND `department_id` = $dId";
+                $db->readQuery($restoreQuery);
+            }
+        }
+    }
+
+    // Reset master rent record
+    $EQUIPMENT_RENT->status = 'rented';
+    $EQUIPMENT_RENT->received_date = null;
+    $EQUIPMENT_RENT->is_cancelled = 0;
+    $EQUIPMENT_RENT->update();
+
+    // Audit log
+    $AUDIT_LOG = new AuditLog(NULL);
+    $AUDIT_LOG->ref_id = $rent_id;
+    $AUDIT_LOG->ref_code = $EQUIPMENT_RENT->bill_number;
+    $AUDIT_LOG->action = 'CANCEL_RETURN';
+    $AUDIT_LOG->description = 'CANCEL RETURN FOR EQUIPMENT BILL NO #' . $EQUIPMENT_RENT->bill_number;
+    $AUDIT_LOG->user_id = isset($_SESSION['id']) ? $_SESSION['id'] : 0;
+    $AUDIT_LOG->created_at = date("Y-m-d H:i:s");
+    $AUDIT_LOG->create();
+
+    echo json_encode(["status" => "success", "message" => "Return cancelled successfully. Bill is now active again."]);
+    exit;
+}
+
+// Cancel return for a single item
+if (isset($_POST['action']) && $_POST['action'] === 'cancel_item_return') {
+    $rent_item_id = $_POST['rent_item_id'] ?? 0;
+
+    if (!$rent_item_id) {
+        echo json_encode(["status" => "error", "message" => "Rent item ID required"]);
+        exit;
+    }
+
+    $db = Database::getInstance();
+    $RENT_ITEM = new EquipmentRentItem($rent_item_id);
+
+    if (!$RENT_ITEM->id) {
+        echo json_encode(["status" => "error", "message" => "Rent item not found"]);
+        exit;
+    }
+
+    $rent_id = $RENT_ITEM->rent_id;
+
+    // Delete all return records for this item
+    $deleteReturnsQuery = "DELETE FROM `equipment_rent_returns` WHERE `rent_item_id` = " . (int) $rent_item_id;
+    $db->readQuery($deleteReturnsQuery);
+
+    // Reset item status to rented and clear returned qty
+    $resetItemQuery = "UPDATE `equipment_rent_items` SET 
+        `status` = 'rented', 
+        `total_returned_qty` = 0, 
+        `pending_qty` = `quantity` 
+        WHERE `id` = " . (int) $rent_item_id;
+    $db->readQuery($resetItemQuery);
+
+    // Set sub-equipment back to rented status
+    if (!empty($RENT_ITEM->sub_equipment_id)) {
+        $updateSubEqQuery = "UPDATE `sub_equipment` SET `rental_status` = 'rent' WHERE `id` = " . (int) $RENT_ITEM->sub_equipment_id;
+        $db->readQuery($updateSubEqQuery);
+    } elseif (!empty($RENT_ITEM->department_id)) {
+        // Bulk item - restore rented stock (add back what was returned)
+        $returnedQty = (int)($RENT_ITEM->total_returned_qty ?? 0);
+        if ($returnedQty > 0) {
+            $eId = (int)$RENT_ITEM->equipment_id;
+            $dId = (int)$RENT_ITEM->department_id;
+            $restoreQuery = "UPDATE `sub_equipment` SET `rented_qty` = `rented_qty` + $returnedQty 
+                             WHERE `equipment_id` = $eId AND `department_id` = $dId";
+            $db->readQuery($restoreQuery);
+        }
+    }
+
+    // Update master rent record - if any item is now rented, master should be rented
+    $EQUIPMENT_RENT = new EquipmentRent($rent_id);
+    $allItems = $EQUIPMENT_RENT->getItems();
+    $allReturned = true;
+    foreach ($allItems as $itm) {
+        if ($itm['status'] !== 'returned') {
+            $allReturned = false;
+            break;
+        }
+    }
+
+    if (!$allReturned) {
+        $EQUIPMENT_RENT->status = 'rented';
+        $EQUIPMENT_RENT->received_date = null;
+        $EQUIPMENT_RENT->is_cancelled = 0;
+        $EQUIPMENT_RENT->update();
+    }
+
+    // Audit log
+    $AUDIT_LOG = new AuditLog(NULL);
+    $AUDIT_LOG->ref_id = $rent_id;
+    $AUDIT_LOG->ref_code = $EQUIPMENT_RENT->bill_number;
+    $AUDIT_LOG->action = 'CANCEL_ITEM_RETURN';
+    $AUDIT_LOG->description = 'CANCEL RETURN FOR ITEM #' . $rent_item_id . ' IN BILL NO #' . $EQUIPMENT_RENT->bill_number;
+    $AUDIT_LOG->user_id = isset($_SESSION['id']) ? $_SESSION['id'] : 0;
+    $AUDIT_LOG->created_at = date("Y-m-d H:i:s");
+    $AUDIT_LOG->create();
+
+    echo json_encode(["status" => "success", "message" => "Item return cancelled successfully."]);
+    exit;
+}
+
+// Cancel bill - cancel a rented bill and release all equipment
+if (isset($_POST['action']) && $_POST['action'] === 'cancel_bill') {
+    $rent_id = $_POST['rent_id'] ?? 0;
+    $cancel_amount = isset($_POST['cancel_amount']) ? floatval($_POST['cancel_amount']) : 0;
+    $cancel_date_input = $_POST['cancel_date'] ?? null;
+    $cancel_date = $cancel_date_input ? date('Y-m-d', strtotime($cancel_date_input)) : date('Y-m-d');
+
+    if (!$rent_id) {
+        echo json_encode(["status" => "error", "message" => "Rent ID required"]);
+        exit;
+    }
+
+    $db = Database::getInstance();
+    $EQUIPMENT_RENT = new EquipmentRent($rent_id);
+
+    if (!$EQUIPMENT_RENT->id) {
+        echo json_encode(["status" => "error", "message" => "Rent record not found"]);
+        exit;
+    }
+
+    if ($EQUIPMENT_RENT->status !== 'rented') {
+        echo json_encode(["status" => "error", "message" => "Only rented bills can be cancelled"]);
+        exit;
+    }
+
+    // Get all items for this rent
+    $items = $EQUIPMENT_RENT->getItems();
+
+    if ($items) {
+        foreach ($items as $item) {
+            $itemId = (int) $item['id'];
+
+            // Delete any return records for this item
+            $deleteReturnsQuery = "DELETE FROM `equipment_rent_returns` WHERE `rent_item_id` = $itemId";
+            $db->readQuery($deleteReturnsQuery);
+
+            // Set item status to cancelled
+            $cancelItemQuery = "UPDATE `equipment_rent_items` SET 
+                `status` = 'cancelled', 
+                `is_cancelled` = 1,
+                `total_returned_qty` = 0, 
+                `pending_qty` = 0 
+                WHERE `id` = $itemId";
+            $db->readQuery($cancelItemQuery);
+
+            // Release sub-equipment back to available
+            if (!empty($item['sub_equipment_id'])) {
+                $subEqId = (int) $item['sub_equipment_id'];
+                $updateSubEqQuery = "UPDATE `sub_equipment` SET `rental_status` = 'available' WHERE `id` = $subEqId";
+                $db->readQuery($updateSubEqQuery);
+            } elseif (!empty($item['department_id'])) {
+                // Bulk item - restore remaining rented stock (quantity - returned)
+                $qtyToRestore = (int)($item['pending_qty'] ?? 0);
+                if ($qtyToRestore > 0) {
+                    $eId = (int)$item['equipment_id'];
+                    $dId = (int)$item['department_id'];
+                    $updateBulkStock = "UPDATE `sub_equipment` SET `rented_qty` = `rented_qty` - $qtyToRestore 
+                                        WHERE `equipment_id` = $eId AND `department_id` = $dId";
+                    $db->readQuery($updateBulkStock);
+                }
+            }
+        }
+    }
+
+    // Update master rent status to cancelled
+    $EQUIPMENT_RENT->status = 'cancelled';
+    $EQUIPMENT_RENT->is_cancelled = 1;
+    $EQUIPMENT_RENT->cancel_amount = $cancel_amount;
+    $EQUIPMENT_RENT->cancel_date = $cancel_date;
+    $EQUIPMENT_RENT->update();
+
+    // Audit log
+    $AUDIT_LOG = new AuditLog(NULL);
+    $AUDIT_LOG->ref_id = $rent_id;
+    $AUDIT_LOG->ref_code = $EQUIPMENT_RENT->bill_number;
+    $AUDIT_LOG->action = 'CANCEL_BILL';
+    $AUDIT_LOG->description = 'CANCEL EQUIPMENT BILL NO #' . $EQUIPMENT_RENT->bill_number;
+    $AUDIT_LOG->user_id = isset($_SESSION['id']) ? $_SESSION['id'] : 0;
+    $AUDIT_LOG->created_at = date("Y-m-d H:i:s");
+    $AUDIT_LOG->create();
+
+    echo json_encode(["status" => "success", "message" => "Bill cancelled successfully. All equipment has been released."]);
+    exit;
+}
+
+// Filter equipment rent master list for DataTable
+if (isset($_POST['filter'])) {
+    $EQUIPMENT_RENT = new EquipmentRent(NULL);
+    echo json_encode($EQUIPMENT_RENT->fetchForDataTable($_REQUEST));
+    exit;
+}
+
+// Filter customers for DataTable
+if (isset($_POST['filter_customers'])) {
+    $db = Database::getInstance();
+
+    $start = isset($_REQUEST['start']) ? (int) $_REQUEST['start'] : 0;
+    $length = isset($_REQUEST['length']) ? (int) $_REQUEST['length'] : 100;
+    $search = $_REQUEST['search']['value'] ?? '';
+
+    // Total records
+    $totalSql = "SELECT COUNT(*) as total FROM customer_master";
+    $totalQuery = $db->readQuery($totalSql);
+    $totalData = mysqli_fetch_assoc($totalQuery)['total'];
+
+    // Search filter
+    $where = "";
+    if (!empty($search)) {
+        $where .= " WHERE (name LIKE '%$search%' OR code LIKE '%$search%' OR mobile_number LIKE '%$search%' OR nic LIKE '%$search%')";
+    }
+
+    // Filtered records
+    $filteredSql = "SELECT COUNT(*) as filtered FROM customer_master $where";
+    $filteredQuery = $db->readQuery($filteredSql);
+    $filteredData = mysqli_fetch_assoc($filteredQuery)['filtered'];
+
+    // Paginated query
+    $sql = "SELECT * FROM customer_master $where ORDER BY name ASC LIMIT $start, $length";
+    $dataQuery = $db->readQuery($sql);
+
+    $data = [];
+    $key = 1;
+
+    while ($row = mysqli_fetch_assoc($dataQuery)) {
+        $nestedData = [
+            "key" => $key,
+            "id" => $row['id'],
+            "code" => $row['code'],
+            "name" => $row['name'],
+            "mobile_number" => $row['mobile_number'],
+            "address" => $row['address'],
+            "nic" => $row['nic'],
+            "outstanding" => number_format($row['old_outstanding'] ?? 0, 2),
+            "is_blacklisted" => $row['is_blacklisted'] ?? 0
+        ];
+
+        $data[] = $nestedData;
+        $key++;
+    }
+
+    echo json_encode([
+        "draw" => intval($_REQUEST['draw'] ?? 1),
+        "recordsTotal" => intval($totalData),
+        "recordsFiltered" => intval($filteredData),
+        "data" => $data
+    ]);
+    exit;
+}
+
+// Simple customer search (non-DataTable) for modal
+if (isset($_POST['action']) && $_POST['action'] === 'search_customers_simple') {
+    $db = Database::getInstance();
+    $search = trim($_POST['search'] ?? '');
+
+    $where = "WHERE id != 1"; // skip default/system customer if any
+    if ($search !== '') {
+        $safeSearch = mysqli_real_escape_string($db->DB_CON, $search);
+        $where .= " AND (name LIKE '%$safeSearch%' OR code LIKE '%$safeSearch%' OR mobile_number LIKE '%$safeSearch%' OR nic LIKE '%$safeSearch%')";
+    }
+
+    // If no search term, only load a small initial set to keep modal light
+    $limitClause = ($search === '') ? 'LIMIT 5' : 'LIMIT 500';
+
+    $sql = "SELECT id, code, name, mobile_number, address, workplace_address, nic, old_outstanding, is_blacklisted, customer_photo, nic_image_1, nic_image_2 FROM customer_master $where ORDER BY name ASC $limitClause";
+    $result = $db->readQuery($sql);
+
+    $data = [];
+    while ($row = mysqli_fetch_assoc($result)) {
+        $data[] = [
+            'id' => $row['id'],
+            'code' => $row['code'],
+            'name' => $row['name'],
+            'mobile_number' => $row['mobile_number'],
+            'address' => $row['address'],
+            'workplace_address' => $row['workplace_address'] ?? '',
+            'nic' => $row['nic'],
+            'outstanding' => number_format($row['old_outstanding'] ?? 0, 2),
+            'is_blacklisted' => $row['is_blacklisted'] ?? 0,
+            'customer_photo' => $row['customer_photo'] ?? '',
+            'nic_image_1' => $row['nic_image_1'] ?? '',
+            'nic_image_2' => $row['nic_image_2'] ?? '',
+        ];
+    }
+
+    echo json_encode([
+        'status' => 'success',
+        'data' => $data
+    ]);
+    exit;
+}
+
+// Get departments for selected equipment
+if (isset($_POST['action']) && $_POST['action'] === 'get_item_departments') {
+    $equipment_id = $_POST['equipment_id'] ?? 0;
+    $sub_equipment_id = $_POST['sub_equipment_id'] ?? '';
+    
+    if (!$equipment_id) {
+        echo json_encode(['status' => 'error', 'message' => 'Equipment ID required']);
+        exit;
+    }
+
+    $EQUIPMENT = new Equipment($equipment_id);
+    $result_departments = [];
+    $db = Database::getInstance();
+
+    // Scenario 1: Sub-Equipment Selected (Serialized)
+    // Return only the department this unit belongs to
+    if (!empty($sub_equipment_id)) {
+        $subEq = new SubEquipment($sub_equipment_id);
+        if ($subEq->department_id) {
+            $dept = new DepartmentMaster($subEq->department_id);
+            $result_departments[] = [
+                'id' => $dept->id,
+                'name' => $dept->name,
+                'available_qty' => 1, // Specific unit is 1
+                'is_selected' => true
+            ];
+        }
+    } 
+    // Scenario 2: Only Equipment Selected (Bulk or Serialized)
+    else {
+        
+        if ($EQUIPMENT->no_sub_items == 1) {
+            // BULK ITEMS: Get all departments and calculate availability
+            $query = "SELECT se.department_id, se.qty, dm.name,
+                      (
+                          SELECT COALESCE(SUM(eri.quantity - (SELECT COALESCE(SUM(return_qty),0) FROM equipment_rent_returns WHERE rent_item_id = eri.id)), 0)
+                          FROM equipment_rent_items eri 
+                          WHERE eri.equipment_id = se.equipment_id 
+                          AND eri.department_id = se.department_id 
+                          AND eri.status = 'rented'
+                          AND (eri.sub_equipment_id IS NULL OR eri.sub_equipment_id = 0)
+                      ) as dynamic_rented_qty
+                      FROM sub_equipment se 
+                      JOIN department_master dm ON se.department_id = dm.id 
+                      WHERE se.equipment_id = $equipment_id";
+                      
+            $res = $db->readQuery($query);
+            while ($row = mysqli_fetch_assoc($res)) {
+                $rented = (float)$row['dynamic_rented_qty'];
+                $available = (float)$row['qty'] - $rented;
+                $result_departments[] = [
+                    'id' => $row['department_id'],
+                    'name' => $row['name'],
+                    'available_qty' => max(0, $available),
+                    'total_qty' => $row['qty'],
+                    'rented_qty' => $rented,
+                    'is_selected' => false
+                ];
+            }
+        } else {
+            // SERIALIZED ITEMS: Get departments that have 'available' units
+            $query = "SELECT se.department_id, COUNT(se.id) as available_count, dm.name 
+                      FROM sub_equipment se 
+                      JOIN department_master dm ON se.department_id = dm.id 
+                      WHERE se.equipment_id = $equipment_id AND se.rental_status = 'available'
+                      GROUP BY se.department_id";
+
+            $res = $db->readQuery($query);
+            while ($row = mysqli_fetch_assoc($res)) {
+                $result_departments[] = [
+                    'id' => $row['department_id'],
+                    'name' => $row['name'],
+                    'available_qty' => $row['available_count'],
+                    'is_selected' => false
+                ];
+            }
+        }
+    }
+    
+    echo json_encode(['status' => 'success', 'departments' => $result_departments]);
+    exit();
+}
+
+// Filter equipment for DataTable (only equipment that has sub-equipment)
+if (isset($_POST['filter_equipment'])) {
+    $db = Database::getInstance();
+
+    $start = isset($_REQUEST['start']) ? (int) $_REQUEST['start'] : 0;
+    $length = isset($_REQUEST['length']) ? (int) $_REQUEST['length'] : 100;
+    $search = $_REQUEST['search']['value'] ?? '';
+
+    // Only get equipment that has sub-equipment OR has no_sub_items enabled
+    $baseWhere = "WHERE (e.no_sub_items = 1 OR EXISTS (SELECT 1 FROM sub_equipment se WHERE se.equipment_id = e.id))";
+
+    // If filtering for repair job (only items with specific sub-units)
+    if (isset($_POST['has_sub_items_only']) && $_POST['has_sub_items_only'] == 'true') {
+        $baseWhere = "WHERE (e.no_sub_items = 0 AND EXISTS (SELECT 1 FROM sub_equipment se WHERE se.equipment_id = e.id))";
+    }
+
+    // Total records
+    $totalSql = "SELECT COUNT(*) as total FROM equipment e $baseWhere";
+    $totalQuery = $db->readQuery($totalSql);
+    $totalData = mysqli_fetch_assoc($totalQuery)['total'];
+
+    // Search filter
+    $where = $baseWhere;
+    if (!empty($search)) {
+        $where .= " AND (e.item_name LIKE '%$search%' OR e.code LIKE '%$search%' OR e.serial_number LIKE '%$search%')";
+    }
+
+    // Filtered records
+    $filteredSql = "SELECT COUNT(*) as filtered FROM equipment e $where";
+    $filteredQuery = $db->readQuery($filteredSql);
+    $filteredData = mysqli_fetch_assoc($filteredQuery)['filtered'];
+
+    // Paginated query with sub-equipment counts and rented counts
+    $sql = "SELECT e.*, ec.name as category_name,
+            (SELECT COUNT(*) FROM sub_equipment se WHERE se.equipment_id = e.id) as total_sub,
+            (SELECT COUNT(*) FROM sub_equipment se WHERE se.equipment_id = e.id AND se.rental_status = 'available') as available_sub,
+            (SELECT COALESCE(SUM(quantity), 0) FROM equipment_rent_items eri WHERE eri.equipment_id = e.id AND eri.status = 'rented') as rented_qty
+            FROM equipment e 
+            LEFT JOIN equipment_category ec ON e.category = ec.id
+            $where ORDER BY e.item_name ASC LIMIT $start, $length";
+    $dataQuery = $db->readQuery($sql);
+
+    $data = [];
+    $key = 1;
+
+    while ($row = mysqli_fetch_assoc($dataQuery)) {
+        $categoryLabel = $row['category_name'] ?: ($row['category'] ?: '-');
+
+        $statusLabel = '';
+        // Calculate global available for badge
+        $globalAvailable = SubEquipment::getGlobalAvailableStock($row['id'], $row['no_sub_items'] == 1);
+        
+        $statusLabel = '';
+        if ($row['no_sub_items'] == 1) {
+            $statusLabel = $globalAvailable > 0
+                ? '<span class="badge bg-soft-success font-size-12">' . $globalAvailable . ' Available</span>'
+                : '<span class="badge bg-soft-danger font-size-12">Out of Stock</span>';
+        } else {
+            $statusLabel = $globalAvailable > 0
+                ? '<span class="badge bg-soft-success font-size-12">' . $globalAvailable . ' / ' . $row['total_sub'] . ' Available</span>'
+                : '<span class="badge bg-soft-danger font-size-12">All Rented</span>';
+        }
+
+        $nestedData = [
+            "key" => $key,
+            "id" => $row['id'],
+            "code" => $row['code'],
+            "item_name" => $row['item_name'],
+            "image_name" => $row['image_name'],
+            "category" => $row['category'],
+            "category_label" => $categoryLabel,
+            "serial_number" => $row['serial_number'],
+            "size" => $row['size'],
+            "value" => $row['value'],
+            "total_sub" => $row['total_sub'],
+
+            "available_sub" => $row['available_sub'],
+            "global_available_qty" => SubEquipment::getGlobalAvailableStock($row['id'], $row['no_sub_items'] == 1),
+            "rented_qty" => $row['rented_qty'],
+            "rent_one_day" => $row['rent_one_day'],
+            "deposit_one_day" => $row['deposit_one_day'],
+            "rent_one_month" => $row['rent_one_month'],
+            "no_sub_items" => $row['no_sub_items'],
+            "change_value" => $row['change_value'] ?? 0,
+            "is_fixed_rate" => $row['is_fixed_rate'] ?? 0,
+            "total_quantity" => $row['quantity'],
+            "availability_label" => $statusLabel
+        ];
+
+        $data[] = $nestedData;
+        $key++;
+    }
+
+    echo json_encode([
+        "draw" => intval($_REQUEST['draw'] ?? 1),
+        "recordsTotal" => intval($totalData),
+        "recordsFiltered" => intval($filteredData),
+        "data" => $data
+    ]);
+    exit;
+}
+
+// Update equipment amount (rent_one_day or rent_one_month)
+if (isset($_POST['action']) && $_POST['action'] === 'update_equipment_amount') {
+    $equipment_id = $_POST['equipment_id'] ?? 0;
+    $rent_type = $_POST['rent_type'] ?? 'day';
+    $amount = $_POST['amount'] ?? 0;
+
+    if (!$equipment_id || $amount <= 0) {
+        echo json_encode([
+            'status' => 'error',
+            'message' => 'Invalid equipment ID or amount'
+        ]);
+        exit;
+    }
+
+    $db = Database::getInstance();
+    $equipment_id = (int) $equipment_id;
+    $amount = (float) $amount;
+
+    // Determine which field to update based on rent type
+    $field = ($rent_type === 'month') ? 'rent_one_month' : 'rent_one_day';
+
+    // Update the equipment table
+    $updateQuery = "UPDATE equipment SET `$field` = '$amount' WHERE id = $equipment_id";
+    $result = $db->readQuery($updateQuery);
+
+    if ($result) {
+        // Create audit log
+        $EQUIPMENT = new Equipment($equipment_id);
+        $AUDIT_LOG = new AuditLog(NULL);
+        $AUDIT_LOG->ref_id = $equipment_id;
+        $AUDIT_LOG->ref_code = $EQUIPMENT->code;
+        $AUDIT_LOG->action = 'UPDATE';
+        $AUDIT_LOG->description = 'UPDATE EQUIPMENT ' . $EQUIPMENT->code . ' - ' . strtoupper($field) . ' to ' . $amount;
+        $AUDIT_LOG->user_id = isset($_SESSION['id']) ? $_SESSION['id'] : 0;
+        $AUDIT_LOG->created_at = date("Y-m-d H:i:s");
+        $AUDIT_LOG->create();
+
+        echo json_encode([
+            'status' => 'success',
+            'message' => 'Equipment amount updated successfully'
+        ]);
+    } else {
+        echo json_encode([
+            'status' => 'error',
+            'message' => 'Failed to update equipment amount'
+        ]);
+    }
+    exit;
+}
+
+// Filter sub-equipment for selection (only available ones)
+if (isset($_POST['filter_sub_equipment'])) {
+    $db = Database::getInstance();
+    $equipment_id = $_POST['equipment_id'] ?? 0;
+
+    if (!$equipment_id) {
+        echo json_encode([
+            "draw" => 1,
+            "recordsTotal" => 0,
+            "recordsFiltered" => 0,
+            "data" => []
+        ]);
+        exit;
+    }
+
+    $start = isset($_REQUEST['start']) ? (int) $_REQUEST['start'] : 0;
+    $length = isset($_REQUEST['length']) ? (int) $_REQUEST['length'] : 100;
+    $search = $_REQUEST['search']['value'] ?? '';
+
+    // Base where - only available sub-equipment for this equipment
+    $baseWhere = "WHERE se.equipment_id = $equipment_id AND se.rental_status = 'available'";
+
+    // Total records
+    $totalSql = "SELECT COUNT(*) as total FROM sub_equipment se $baseWhere";
+    $totalQuery = $db->readQuery($totalSql);
+    $totalData = mysqli_fetch_assoc($totalQuery)['total'];
+
+    // Search filter
+    $where = $baseWhere;
+    if (!empty($search)) {
+        $where .= " AND (se.code LIKE '%$search%')";
+    }
+
+    // Filtered records
+    $filteredSql = "SELECT COUNT(*) as filtered FROM sub_equipment se $where";
+    $filteredQuery = $db->readQuery($filteredSql);
+    $filteredData = mysqli_fetch_assoc($filteredQuery)['filtered'];
+
+    // Paginated query
+    $sql = "SELECT se.*, e.code as equipment_code, e.item_name as equipment_name 
+            FROM sub_equipment se 
+            LEFT JOIN equipment e ON se.equipment_id = e.id
+            $where ORDER BY se.code ASC LIMIT $start, $length";
+    $dataQuery = $db->readQuery($sql);
+
+    $data = [];
+    $key = 1;
+
+    while ($row = mysqli_fetch_assoc($dataQuery)) {
+        $nestedData = [
+            "key" => $key,
+            "id" => $row['id'],
+            "code" => $row['code'],
+            "equipment_id" => $row['equipment_id'],
+            "equipment_code" => $row['equipment_code'],
+            "equipment_name" => $row['equipment_name'],
+            "rental_status" => $row['rental_status'],
+            "status_label" => '<span class="badge bg-soft-success font-size-12">Available</span>'
+        ];
+
+        $data[] = $nestedData;
+        $key++;
+    }
+
+    echo json_encode([
+        "draw" => intval($_REQUEST['draw'] ?? 1),
+        "recordsTotal" => intval($totalData),
+        "recordsFiltered" => intval($filteredData),
+        "data" => $data
+    ]);
+    exit;
+}
+
+// Add deposit payment
+if (isset($_POST['action']) && $_POST['action'] === 'add_deposit_payment') {
+    $rent_id = intval($_POST['rent_id'] ?? 0);
+    $amount = floatval($_POST['amount'] ?? 0);
+    $payment_date = $_POST['payment_date'] ?? date('Y-m-d');
+    $remark = trim($_POST['remark'] ?? '');
+
+    if (!$rent_id) {
+        echo json_encode(["status" => "error", "message" => "Rent ID required"]);
+        exit;
+    }
+    if ($amount <= 0) {
+        echo json_encode(["status" => "error", "message" => "Amount must be greater than 0"]);
+        exit;
+    }
+
+    $DP = new DepositPayment(NULL);
+    $DP->rent_id = $rent_id;
+    $DP->amount = $amount;
+    $DP->payment_date = $payment_date;
+    $DP->remark = $remark;
+    $id = $DP->create();
+
+    if ($id) {
+        $newTotal = DepositPayment::syncDepositTotal($rent_id);
+
+        // Reduce customer rent_outstanding by the deposit amount
+        $RENT = new EquipmentRent($rent_id);
+        if ($RENT->customer_id) {
+            $db = Database::getInstance();
+            $depositAmt = floatval($amount);
+            $db->readQuery("UPDATE `customer_master` SET `rent_outstanding` = GREATEST(0, COALESCE(`rent_outstanding`,0) - $depositAmt) WHERE `id` = " . (int)$RENT->customer_id);
+        }
+
+        // Calculate updated bill outstanding for real-time UI update
+        $db = Database::getInstance();
+        $customerDeposit = floatval($newTotal);
+        $today = date('Y-m-d');
+
+        // Total charges from returned items
+        $chargesQuery = "SELECT COALESCE(SUM(
+                            CASE WHEN err.rental_override IS NOT NULL
+                                THEN err.rental_override
+                                ELSE CASE WHEN COALESCE(e.is_fixed_rate, 0) = 1
+                                    THEN ((COALESCE(eri.amount,0) / NULLIF(eri.quantity,0)) * err.return_qty)
+                                    ELSE (GREATEST(1, CEILING(TIMESTAMPDIFF(SECOND, eri.rental_date, err.return_date) / 86400))
+                                        * (COALESCE(eri.amount,0) / NULLIF(eri.quantity,0))
+                                        * err.return_qty)
+                                END
+                            END
+                            + COALESCE(err.extra_day_amount, 0)
+                            + COALESCE(err.damage_amount, 0)
+                            + COALESCE(err.penalty_amount, 0)
+                        ), 0) as total_charges
+                        FROM equipment_rent_returns err
+                        INNER JOIN equipment_rent_items eri ON err.rent_item_id = eri.id
+                        LEFT JOIN equipment e ON eri.equipment_id = e.id
+                        WHERE eri.rent_id = $rent_id";
+        $chargesData = mysqli_fetch_assoc($db->readQuery($chargesQuery));
+        $totalCharges = floatval($chargesData['total_charges'] ?? 0);
+
+        // Accrued charges for non-returned items
+        $accruedQuery = "SELECT COALESCE(SUM(
+            CASE WHEN COALESCE(e.is_fixed_rate, 0) = 1
+                THEN (COALESCE(ri.amount,0) / NULLIF(ri.quantity,0))
+                     * (ri.quantity - COALESCE(ri.total_returned_qty, 0))
+                ELSE GREATEST(1, CEILING(TIMESTAMPDIFF(SECOND, ri.rental_date, '$today') / 86400))
+                     * (COALESCE(ri.amount,0) / NULLIF(ri.quantity,0))
+                     * (ri.quantity - COALESCE(ri.total_returned_qty, 0))
+            END
+        ), 0) as accrued_charges
+        FROM equipment_rent_items ri
+        LEFT JOIN equipment e ON ri.equipment_id = e.id
+        WHERE ri.rent_id = $rent_id
+          AND (ri.quantity - COALESCE(ri.total_returned_qty, 0)) > 0";
+        $accruedData = mysqli_fetch_assoc($db->readQuery($accruedQuery));
+        $accruedCharges = floatval($accruedData['accrued_charges'] ?? 0);
+
+        $billOutstanding = round(max(0, ($totalCharges + $accruedCharges) - $customerDeposit), 2);
+
+        // Get updated customer rent_outstanding
+        $CUSTOMER = new CustomerMaster($RENT->customer_id);
+        $rentOutstanding = floatval($CUSTOMER->rent_outstanding ?? 0);
+
+        echo json_encode([
+            "status" => "success",
+            "message" => "Deposit payment added",
+            "deposit_total" => $newTotal,
+            "payments" => DepositPayment::getByRentId($rent_id),
+            "bill_outstanding" => $billOutstanding,
+            "rent_outstanding" => $rentOutstanding
+        ]);
+    } else {
+        echo json_encode(["status" => "error", "message" => "Failed to add deposit payment"]);
+    }
+    exit;
+}
+
+// Delete deposit payment
+if (isset($_POST['action']) && $_POST['action'] === 'delete_deposit_payment') {
+    $payment_id = intval($_POST['payment_id'] ?? 0);
+
+    if (!$payment_id) {
+        echo json_encode(["status" => "error", "message" => "Payment ID required"]);
+        exit;
+    }
+
+    $DP = new DepositPayment($payment_id);
+    if (!$DP->id) {
+        echo json_encode(["status" => "error", "message" => "Payment not found"]);
+        exit;
+    }
+
+    $deletedAmount = floatval($DP->amount);
+    $rent_id = $DP->rent_id;
+    $DP->delete();
+    $newTotal = DepositPayment::syncDepositTotal($rent_id);
+
+    // Increase customer rent_outstanding back by the deleted deposit amount
+    $RENT = new EquipmentRent($rent_id);
+    if ($RENT->customer_id) {
+        $db = Database::getInstance();
+        $db->readQuery("UPDATE `customer_master` SET `rent_outstanding` = COALESCE(`rent_outstanding`,0) + $deletedAmount WHERE `id` = " . (int)$RENT->customer_id);
+    }
+
+    // Calculate updated bill outstanding for real-time UI update
+    $db = Database::getInstance();
+    $customerDeposit = floatval($newTotal);
+    $today = date('Y-m-d');
+
+    $chargesQuery = "SELECT COALESCE(SUM(
+                        CASE WHEN err.rental_override IS NOT NULL
+                            THEN err.rental_override
+                            ELSE CASE WHEN COALESCE(e.is_fixed_rate, 0) = 1
+                                THEN ((COALESCE(eri.amount,0) / NULLIF(eri.quantity,0)) * err.return_qty)
+                                ELSE (GREATEST(1, CEILING(TIMESTAMPDIFF(SECOND, eri.rental_date, err.return_date) / 86400))
+                                    * (COALESCE(eri.amount,0) / NULLIF(eri.quantity,0))
+                                    * err.return_qty)
+                            END
+                        END
+                        + COALESCE(err.extra_day_amount, 0)
+                        + COALESCE(err.damage_amount, 0)
+                        + COALESCE(err.penalty_amount, 0)
+                    ), 0) as total_charges
+                    FROM equipment_rent_returns err
+                    INNER JOIN equipment_rent_items eri ON err.rent_item_id = eri.id
+                    LEFT JOIN equipment e ON eri.equipment_id = e.id
+                    WHERE eri.rent_id = $rent_id";
+    $chargesData = mysqli_fetch_assoc($db->readQuery($chargesQuery));
+    $totalCharges = floatval($chargesData['total_charges'] ?? 0);
+
+    $accruedQuery = "SELECT COALESCE(SUM(
+        CASE WHEN COALESCE(e.is_fixed_rate, 0) = 1
+            THEN (COALESCE(ri.amount,0) / NULLIF(ri.quantity,0))
+                 * (ri.quantity - COALESCE(ri.total_returned_qty, 0))
+            ELSE GREATEST(1, CEILING(TIMESTAMPDIFF(SECOND, ri.rental_date, '$today') / 86400))
+                 * (COALESCE(ri.amount,0) / NULLIF(ri.quantity,0))
+                 * (ri.quantity - COALESCE(ri.total_returned_qty, 0))
+        END
+    ), 0) as accrued_charges
+    FROM equipment_rent_items ri
+    LEFT JOIN equipment e ON ri.equipment_id = e.id
+    WHERE ri.rent_id = $rent_id
+      AND (ri.quantity - COALESCE(ri.total_returned_qty, 0)) > 0";
+    $accruedData = mysqli_fetch_assoc($db->readQuery($accruedQuery));
+    $accruedCharges = floatval($accruedData['accrued_charges'] ?? 0);
+
+    $billOutstanding = round(max(0, ($totalCharges + $accruedCharges) - $customerDeposit), 2);
+
+    $CUSTOMER = new CustomerMaster($RENT->customer_id);
+    $rentOutstanding = floatval($CUSTOMER->rent_outstanding ?? 0);
+
+    echo json_encode([
+        "status" => "success",
+        "message" => "Deposit payment deleted",
+        "deposit_total" => $newTotal,
+        "payments" => DepositPayment::getByRentId($rent_id),
+        "bill_outstanding" => $billOutstanding,
+        "rent_outstanding" => $rentOutstanding
+    ]);
+    exit;
+}
+
+// Get deposit payments for a rent
+if (isset($_POST['action']) && $_POST['action'] === 'get_deposit_payments') {
+    $rent_id = intval($_POST['rent_id'] ?? 0);
+
+    if (!$rent_id) {
+        echo json_encode(["status" => "error", "message" => "Rent ID required"]);
+        exit;
+    }
+
+    echo json_encode([
+        "status" => "success",
+        "deposit_total" => DepositPayment::getTotalByRentId($rent_id),
+        "payments" => DepositPayment::getByRentId($rent_id)
+    ]);
+    exit;
+}
+
+// Settle company refund outstanding
+if (isset($_POST['action']) && $_POST['action'] === 'settle_company_refund') {
+    $rent_id = intval($_POST['rent_id'] ?? 0);
+    $amount = floatval($_POST['amount'] ?? 0);
+
+    if (!$rent_id || $amount <= 0) {
+        echo json_encode(["status" => "error", "message" => "Invalid rent ID or amount"]);
+        exit;
+    }
+
+    $db = Database::getInstance();
+
+    // Get all return records with company_outstanding > 0 for this rent
+    $query = "SELECT err.id, err.company_outstanding
+              FROM equipment_rent_returns err
+              INNER JOIN equipment_rent_items eri ON err.rent_item_id = eri.id
+              WHERE eri.rent_id = $rent_id AND err.company_outstanding > 0
+              ORDER BY err.id ASC";
+    $result = $db->readQuery($query);
+    
+    $records = [];
+    $totalOutstanding = 0;
+    while ($row = mysqli_fetch_assoc($result)) {
+        $records[] = $row;
+        $totalOutstanding += floatval($row['company_outstanding']);
+    }
+
+    if (empty($records) || $totalOutstanding <= 0) {
+        echo json_encode(["status" => "error", "message" => "No company outstanding to settle"]);
+        exit;
+    }
+
+    if ($amount > $totalOutstanding) {
+        echo json_encode(["status" => "error", "message" => "Amount exceeds total company outstanding (Rs. " . number_format($totalOutstanding, 2) . ")"]);
+        exit;
+    }
+
+    // Distribute payment proportionally across records
+    $remaining = $amount;
+    foreach ($records as $rec) {
+        if ($remaining <= 0) break;
+        $recordOutstanding = floatval($rec['company_outstanding']);
+        $share = min($remaining, $recordOutstanding);
+        
+        $RETURN = new EquipmentRentReturn($rec['id']);
+        $settleResult = $RETURN->settleCompanyRefund($share);
+        
+        if (isset($settleResult['error']) && $settleResult['error']) {
+            echo json_encode(["status" => "error", "message" => $settleResult['message']]);
+            exit;
+        }
+        $remaining -= $share;
+    }
+
+    // Get new totals
+    $newQuery = "SELECT COALESCE(SUM(err.company_outstanding), 0) as total_company_outstanding
+                 FROM equipment_rent_returns err
+                 INNER JOIN equipment_rent_items eri ON err.rent_item_id = eri.id
+                 WHERE eri.rent_id = $rent_id";
+    $newResult = mysqli_fetch_assoc($db->readQuery($newQuery));
+    $newTotal = floatval($newResult['total_company_outstanding'] ?? 0);
+
+    echo json_encode([
+        "status" => "success",
+        "message" => "Company refund settled successfully",
+        "new_company_outstanding" => $newTotal
+    ]);
+    exit;
+}
