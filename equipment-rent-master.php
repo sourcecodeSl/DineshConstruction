@@ -569,6 +569,13 @@ $bill_number = $lastId + 1;
                                                                                 class="fw-bold">0.00</span></small>
                                                                     </td>
                                                                 </tr>
+                                                                <tr class="border-top">
+                                                                    <td class="text-start fw-bold">Total (Sub Total + Transport + Deposit):
+                                                                    </td>
+                                                                    <td class="text-end">
+                                                                        <span id="summary_grand_total" class="fw-bold text-primary">0.00</span>
+                                                                    </td>
+                                                                </tr>
                                                                 <tr>
                                                                     <td class="text-start fw-medium">Customer Refund Balance:
                                                                     </td>

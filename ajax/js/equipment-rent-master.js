@@ -1073,10 +1073,22 @@ jQuery(document).ready(function () {
   function updateTotalsSummary() {
     var subTotal = 0;
     rentItems.forEach(function (item) {
-      subTotal += parseAmount(item.amount);
+      var itemAmount = parseAmount(item.amount);
+      var itemDuration = parseFloat(item.duration) || 0;
+      // Fixed-rate items are a flat charge; others are rate x duration
+      if (item.is_fixed_rate == 1 || itemDuration <= 0) {
+        subTotal += itemAmount;
+      } else {
+        subTotal += itemAmount * itemDuration;
+      }
     });
 
-    $("#summary_sub_total").text(subTotal.toFixed(2));
+    var transportCost = parseAmount($("#transport_cost").val());
+    var depositAmount = parseAmount($("#custom_deposit").val());
+    var grandTotal = subTotal + transportCost + depositAmount;
+
+    $("#summary_sub_total").text(formatAmount(subTotal));
+    $("#summary_grand_total").text(formatAmount(grandTotal));
   }
 
   // Update totals when transport cost or deposit changes
@@ -1321,6 +1333,7 @@ jQuery(document).ready(function () {
           $("#workplace_address").val(rent.workplace_address || "");
           $("#transport_cost").val(formatAmount(rent.transport_cost || 0));
           $("#custom_deposit").val(formatAmount(rent.deposit_total || 0));
+          updateTotalsSummary();
           // Show manage deposits button for existing rents
           $("#btn-manage-deposits").show();
           // Load transport details directly from loaded rent (we updated get_rent_details to include it, or we fetch it)
@@ -2582,6 +2595,7 @@ jQuery(document).ready(function () {
     $("#item_sub_equipment_display").val("");
     $("#transport_cost").val("");
     $("#custom_deposit").val("");
+    $("#summary_grand_total").text("0.00");
     $("#transport_cost").prop("readonly", false); // allow manual transport cost entry
     $("#custom_deposit").prop("readonly", false); // allow manual input for new rent
     $("#btn-manage-deposits").hide();
@@ -3714,6 +3728,7 @@ jQuery(document).ready(function () {
           });
           renderDepositPayments(result.payments, result.deposit_total);
           $("#custom_deposit").val(formatAmount(parseFloat(result.deposit_total || 0)));
+          updateTotalsSummary();
           // Clear form
           $("#deposit_pay_amount").val("");
           $("#deposit_pay_remark").val("");
@@ -3794,6 +3809,7 @@ jQuery(document).ready(function () {
                 $("#custom_deposit").val(
                   formatAmount(parseFloat(result.deposit_total || 0)),
                 );
+                updateTotalsSummary();
 
                 // Immediately update outstanding display in real-time
                 if (result.bill_outstanding !== undefined || result.rent_outstanding !== undefined) {
