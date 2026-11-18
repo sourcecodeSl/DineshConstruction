@@ -198,6 +198,7 @@ class EquipmentRentItem
     {
         $query = "SELECT eri.*, 
                   e.code as equipment_code, e.item_name as equipment_name, e.no_sub_items,
+                  COALESCE(e.is_fixed_rate, 0) as equipment_is_fixed_rate,
                   se.code as sub_equipment_code,
                   dm.name as department_name,
                   COALESCE(eri.damage_amount, 0) as damage_amount,

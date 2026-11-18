@@ -94,9 +94,21 @@ foreach ($rent_items as $ritem) {
 }
 
 // Calculate totals
-$total_amount = 0;
+// Stored item amount is the per-period charge (rate x qty). The estimated rental
+// for the bill is that amount x duration, except fixed-rate items (flat charge).
+function rentItemLineTotal($item)
+{
+    $amount = floatval($item['amount'] ?? 0);
+    $duration = floatval($item['duration'] ?? 0);
+    $isFixed = intval($item['equipment_is_fixed_rate'] ?? $item['is_fixed_rate'] ?? 0) === 1;
+    return ($isFixed || $duration <= 0) ? $amount : $amount * $duration;
+}
+
+$total_amount = 0;          // per-period amount (used in terms: "Rs. X per day")
+$estimated_rental = 0;      // amount x duration
 foreach ($rent_items as $item) {
     $total_amount += floatval($item['amount']);
+    $estimated_rental += rentItemLineTotal($item);
 }
 
 // Transport amount from record
@@ -162,7 +174,7 @@ $printedAt = !empty($savedPrintedAt) ? $savedPrintedAt : date('Y-m-d H:i:s');
 if ($isReturnInvoice) {
     $hire_amount = $total_actual_rental;
 } else {
-    $hire_amount = $total_amount;
+    $hire_amount = $estimated_rental;
 }
 // Include deposit in total customer paid (deposit is money the customer paid upfront)
 $total_customer_paid += $total_deposit;
@@ -170,6 +182,12 @@ $total_customer_paid += $total_deposit;
 // Calculate net amount and outstanding
 $net_amount = $hire_amount + $total_deposit + $transport_amount + $total_extra_charges;
 $total_outstanding = $net_amount; // For now, assuming full amount is outstanding
+
+// On a rent (non-return) bill, the balance the customer still has to pay is
+// the full bill (rental + deposit + transport) minus what they already paid.
+if (!$isReturnInvoice) {
+    $refund_balance = $total_customer_paid - $net_amount;
+}
 
 // Get customer WhatsApp number (mobile_number_2) for WhatsApp sharing
 $customerMobile = !empty($CUSTOMER_MASTER->mobile_number_2) ? $CUSTOMER_MASTER->mobile_number_2 : '';
@@ -772,7 +790,7 @@ if (!empty($customerMobile)) {
                                     ?>
                                     <td class="text-center"><?php echo intval($billQty); ?></td>
                                     <td class="text-center"><?php echo intval($issuedQty); ?></td>
-                                    <td class="text-end"><?php echo number_format($item['amount'], 2); ?></td>
+                                    <td class="text-end"><?php echo number_format(rentItemLineTotal($item), 2); ?></td>
                                 </tr>
                             <?php endforeach; ?>
 
@@ -939,6 +957,12 @@ if (!empty($customerMobile)) {
                                 <td class="summary-label">Total Rental Amount:</td>
                                 <td class="summary-value"><?php echo number_format($hire_amount + $transport_amount + $total_extra_charges, 2); ?></td>
                             </tr>
+                            <?php if (!$isReturnInvoice): ?>
+                            <tr>
+                                <td class="summary-label fw-bold">Total Amount (Rental + Deposit):</td>
+                                <td class="summary-value fw-bold"><?php echo number_format($net_amount, 2); ?></td>
+                            </tr>
+                            <?php endif; ?>
                             <?php if ($total_repair_cost > 0): ?>
                             <tr>
                                 <td class="summary-label">Repair Cost Deducted:</td>
@@ -991,7 +1015,7 @@ if (!empty($customerMobile)) {
                 $customTerms = [
                     sprintf(
                         'The customer should make the full payment for the total number of days including the date of receiving equipment and the date of returning the equipment and amount of Rs. <strong>%s</strong> %s as per rental.',
-                        number_format($hire_amount, 2),
+                        number_format($isReturnInvoice ? $hire_amount : $total_amount, 2),
                         $rateDescriptor
                     ),
                     sprintf(
