@@ -782,6 +782,17 @@ if (!empty($customerMobile)) {
                                         $rateUnit = ($item['rent_type'] === 'month') ? '/month' : '/day';
                                         ?>
                                         <small style="font-size:10px; color:#666;"><?php echo $rateUnit; ?></small>
+                                        <?php
+                                        $itemDuration = intval($item['duration'] ?? 0);
+                                        $itemIsFixed = intval($item['equipment_is_fixed_rate'] ?? $item['is_fixed_rate'] ?? 0) === 1;
+                                        if (!$itemIsFixed && $itemDuration > 0):
+                                            $isMonthItem = ($item['rent_type'] === 'month');
+                                            $durLabel = $isMonthItem
+                                                ? ($itemDuration > 1 ? 'Months' : 'Month')
+                                                : ($itemDuration > 1 ? 'Days' : 'Day');
+                                        ?>
+                                            <small style="font-size:10px; color:#000; font-weight:600;">&times; <?php echo $itemDuration . ' ' . $durLabel; ?></small>
+                                        <?php endif; ?>
                                     </td>
                                     <?php
                                         $billQty = isset($item['bill_qty']) ? (float)$item['bill_qty'] : (float)($item['quantity'] ?? 0);
