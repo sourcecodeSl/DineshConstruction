@@ -1,6 +1,7 @@
 <!doctype html>
 <?php
 include 'class/include.php';
+include_once 'gatepass-sheet.php';
 
 if (!isset($_SESSION)) {
     session_start();
@@ -169,6 +170,19 @@ $isReturnInvoice = !empty($return_rows);
 // Rent and return invoices keep separate first-print date/times; until printed, show the current time
 $savedPrintedAt = $isReturnInvoice ? $EQUIPMENT_RENT->return_printed_at : $EQUIPMENT_RENT->printed_at;
 $printedAt = !empty($savedPrintedAt) ? $savedPrintedAt : date('Y-m-d H:i:s');
+
+// Gate pass(es) printed on the next A4 page of a rent invoice.
+// Auto-create one for any billed items not yet covered (older bills / items added after save).
+// Not shown on return invoices, cancelled bills or the customer's WhatsApp link.
+$invoiceGatepasses = [];
+$isWhatsAppView = ($_GET['wa'] ?? '') === '1';
+if (!$isReturnInvoice && empty($EQUIPMENT_RENT->is_cancelled) && !$isWhatsAppView) {
+    Gatepass::autoCreateForRent($EQUIPMENT_RENT->id, $US->name ?? '');
+    $gatepassRows = array_reverse((new Gatepass())->getByInvoiceId($EQUIPMENT_RENT->id)); // oldest first
+    foreach ($gatepassRows as $gpRow) {
+        $invoiceGatepasses[] = new Gatepass($gpRow['id']);
+    }
+}
 
 // For return invoices, update hire_amount to reflect actual total rental charged
 if ($isReturnInvoice) {
@@ -631,7 +645,28 @@ if (!empty($customerMobile)) {
             }
         }
 
+        /* Gate pass page (page 2 of the bill) */
+        .gp-page {
+            background: #fff;
+            margin-top: 24px;
+            padding: 10mm;
+            box-shadow: 0 0.75rem 1.5rem rgba(18, 38, 63, 0.03);
+            border: 1px solid #dee2e6;
+        }
+
+        @media print {
+            .gp-page {
+                break-before: page;
+                page-break-before: always;
+                margin: 0;
+                padding: 5mm 10mm;
+                border: none;
+                box-shadow: none;
+            }
+        }
+
     </style>
+    <?php renderGatepassStyles(); ?>
 
 </head>
 
@@ -1137,6 +1172,13 @@ if (!empty($customerMobile)) {
             </div>
         </div>
     </div>
+
+    <?php foreach ($invoiceGatepasses as $INVOICE_GATEPASS): ?>
+        <!-- Gate Pass: always starts on a new A4 page after the bill -->
+        <div class="gp-page">
+            <?php renderGatepassSheet($INVOICE_GATEPASS, $EQUIPMENT_RENT, $CUSTOMER_MASTER); ?>
+        </div>
+    <?php endforeach; ?>
 </div>
 
 <!-- JS -->

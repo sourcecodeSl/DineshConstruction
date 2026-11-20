@@ -151,4 +151,90 @@ class Gatepass
         $GATEPASS_ITEM = new GatepassItem(null);
         return $GATEPASS_ITEM->getByGatepassId($this->id);
     }
+
+    /**
+     * Auto-generate a gate pass for a rent bill covering every billed item
+     * that is not yet included in an earlier gate pass.
+     * Returns the new gate pass id, or false when nothing is left to issue.
+     */
+    public static function autoCreateForRent($rent_id, $issued_by = '')
+    {
+        $rent_id = (int) $rent_id;
+        $RENT = new EquipmentRent($rent_id);
+        if (!$RENT->id || !empty($RENT->is_cancelled)) {
+            return false;
+        }
+
+        $db = Database::getInstance();
+
+        // Quantities already issued through earlier gate passes
+        $issuedMap = [];
+        $issuedResult = $db->readQuery("SELECT gi.equipment_id, gi.sub_equipment_id, SUM(gi.quantity) AS total_issued
+                                        FROM gatepass_items gi
+                                        INNER JOIN gatepass g ON gi.gatepass_id = g.id
+                                        WHERE g.invoice_id = $rent_id
+                                        GROUP BY gi.equipment_id, gi.sub_equipment_id");
+        while ($row = mysqli_fetch_assoc($issuedResult)) {
+            $issuedMap[$row['equipment_id'] . '_' . ($row['sub_equipment_id'] ?: 'NULL')] = (float) $row['total_issued'];
+        }
+
+        $items = [];
+        foreach ((new EquipmentRentItem(null))->getByRentId($rent_id) as $item) {
+            $key = $item['equipment_id'] . '_' . ($item['sub_equipment_id'] ?: 'NULL');
+            $qty = (float) $item['quantity'];
+            // Consume already-issued qty line by line so repeated equipment lines are handled correctly
+            $covered = min($qty, $issuedMap[$key] ?? 0);
+            $issuedMap[$key] = ($issuedMap[$key] ?? 0) - $covered;
+            $available = $qty - $covered;
+            if ($available <= 0) {
+                continue;
+            }
+            $items[] = [
+                'equipment_id' => $item['equipment_id'],
+                'sub_equipment_id' => $item['sub_equipment_id'] ?: null,
+                'equipment_name' => $item['equipment_name'],
+                'quantity' => $available,
+            ];
+        }
+
+        if (empty($items)) {
+            return false;
+        }
+
+        $CUSTOMER = new CustomerMaster($RENT->customer_id);
+        $DOCUMENT_TRACKING = new DocumentTracking(1);
+        $lastId = (int) ($DOCUMENT_TRACKING->gatepass_id ?? 0);
+
+        $GATEPASS = new Gatepass();
+        $GATEPASS->gatepass_code = 'GP/' . ($_SESSION['id'] ?? '0') . '/0' . ($lastId + 1);
+        $GATEPASS->invoice_id = $rent_id;
+        $GATEPASS->name = $CUSTOMER->name;
+        $GATEPASS->address = $CUSTOMER->address;
+        $GATEPASS->id_number = $CUSTOMER->nic ?? '';
+        $GATEPASS->equipment_type = implode(', ', array_map(function ($i) {
+            return $i['equipment_name'] . ' (' . $i['quantity'] . ')';
+        }, $items));
+        $GATEPASS->serial_no = '';
+        $GATEPASS->issued_by = $issued_by;
+        $GATEPASS->gatepass_date = date('Y-m-d');
+
+        $gp_id = $GATEPASS->create();
+        if (!$gp_id) {
+            return false;
+        }
+
+        foreach ($items as $item) {
+            $GP_ITEM = new GatepassItem(null);
+            $GP_ITEM->gatepass_id = $gp_id;
+            $GP_ITEM->equipment_id = (int) $item['equipment_id'];
+            $GP_ITEM->sub_equipment_id = $item['sub_equipment_id'] ? (int) $item['sub_equipment_id'] : null;
+            $GP_ITEM->quantity = $item['quantity'];
+            $GP_ITEM->remarks = '';
+            $GP_ITEM->create();
+        }
+
+        (new DocumentTracking(null))->incrementDocumentId('gatepass');
+
+        return $gp_id;
+    }
 }

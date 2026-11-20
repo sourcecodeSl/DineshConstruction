@@ -220,13 +220,17 @@ if (isset($_POST['create'])) {
             }
         }
 
+        // Auto-generate the gate pass for this bill (printed as page 2 of the invoice)
+        $issuedByUser = isset($_SESSION['id']) ? new User($_SESSION['id']) : null;
+        Gatepass::autoCreateForRent($rent_id, $issuedByUser->name ?? '');
+
         // Return next transport code
         $TD_DUMMY = new TransportDetail(null);
         $nextCode = $TD_DUMMY->formatId($TD_DUMMY->getNextId());
 
         echo json_encode([
-            "status" => "success", 
-            "rent_id" => $rent_id, 
+            "status" => "success",
+            "rent_id" => $rent_id,
             "bill_number" => $bill_number,
             "next_code" => $nextCode
         ]);
